@@ -28,7 +28,7 @@ change rather than a rewrite.
 | LLM | OpenAI |
 | Agent memory | mem0 **Platform (cloud)** |
 | Observability | **LangSmith** (managed) |
-| Agent UI transport | **AG-UI protocol**, with CopilotKit on the React side |
+| Agent UI transport | **AG-UI protocol**, with assistant-ui on the React side |
 | Persistence | Postgres (Docker) — LangGraph checkpoints + users/sessions |
 | Auth | Google OAuth (Gmail provider) |
 
@@ -39,9 +39,17 @@ Confirmed against official docs as of August 2026:
 - `ag-ui-protocol` (PyPI v0.1.21) — core typed event models + SSE encoding.
 - `ag-ui-langgraph` (PyPI v0.0.44) — official LangGraph adapter, provides
   `add_langgraph_fastapi_endpoint(app, graph, "/agent")`.
-- `@copilotkit/react-core` + `@copilotkit/react-ui` (npm v1.69.3) — recommended React
-  client for AG-UI, built by the same team. `@ag-ui/client` (v0.0.58) is the lower-level
-  alternative but has no documented bare-React sample.
+- `@assistant-ui/react` (npm v0.15.17) + `@assistant-ui/react-ag-ui` (v0.0.57) — the React
+  client. MIT-licensed, actively maintained (both published 2026-08-27; AG-UI package
+  commits 2026-08-29). Provides `useAgUiRuntime`, `AssistantRuntimeProvider`, `<Thread />`,
+  and the `adapters.history` seam that makes conversation resumption work — see
+  [Frontend client choice](#frontend-client-choice-assistant-ui-over-copilotkit).
+  `@assistant-ui/react-markdown` is a separate (also MIT) package if markdown rendering is
+  wanted.
+- `@ag-ui/client` (v0.0.58) — provides `HttpAgent`, the transport assistant-ui's runtime
+  wraps. Not used directly for rendering.
+- **CopilotKit (`@copilotkit/react-*` v1.69.3) was evaluated and rejected** — see the same
+  section for why.
 - `mem0ai` (PyPI v2.0.19) — cloud client is `from mem0 import MemoryClient`
   (`AsyncMemoryClient` for async). Auth via `MEM0_API_KEY`.
   API: `client.add(messages, user_id=...)`, `client.search(query, filters={"user_id": ...})`.
@@ -58,7 +66,7 @@ Two runtime groups.
 
 - **Backend**: one FastAPI process serving both the Google OAuth routes and the AG-UI
   endpoint that wraps the compiled LangGraph graph.
-- **Frontend**: Vite dev server running React + CopilotKit, talking to the backend's
+- **Frontend**: Vite dev server running React + assistant-ui, talking to the backend's
   AG-UI endpoint and OAuth routes.
 
 **Infra services** — Docker Compose, stateful and disposable:
@@ -109,13 +117,16 @@ added later without disturbing this structure.
 ### Frontend
 
 - Unauthenticated: a single "Sign in with Google" screen that redirects to the backend.
-- Authenticated: a conversation sidebar (list, new, rename, delete) alongside a CopilotKit
-  provider plus `<CopilotChat/>` pointed at `/agent`, keyed by the selected `threadId`.
+- Authenticated: a conversation sidebar (list, new, rename, delete) alongside an
+  `AssistantRuntimeProvider` + `<Thread />` pointed at `/agent`, keyed by the selected
+  `threadId`, with a history adapter that rehydrates the transcript on switch.
 
-The sidebar is the application's own component. CopilotKit's built-in threads drawer
-requires CopilotKit Intelligence, which this project does not use — see
-[Open question](#open-question--resuming-conversation-history-in-the-ui), which currently
-blocks history rehydration on conversation switch.
+The sidebar is the application's own component, driven by the `/conversations` API rather
+than assistant-ui's `@experimental` thread-list adapter — see
+[Frontend client choice](#frontend-client-choice-assistant-ui-over-copilotkit).
+
+assistant-ui's primitives are headless, so the visual design is fully the application's
+own; the mockup is implemented directly rather than approximated through theme props.
 
 The UI is otherwise deliberately minimal — no in-app memory inspector and no per-message
 trace links.
@@ -181,7 +192,8 @@ All are scoped to the authenticated user, without exception.
 |---|---|
 | `GET /conversations` | List for the current user, newest first |
 | `POST /conversations` | Create; returns the new id |
-| `GET /conversations/{id}` | Load messages to resume, after the ownership check |
+| `GET /conversations/{id}` | Conversation metadata, after the ownership check |
+| `GET /conversations/{id}/messages` | Transcript for rehydration, read via `graph.get_state(config)`. Consumed by assistant-ui's history adapter |
 | `PATCH /conversations/{id}` | Rename |
 | `DELETE /conversations/{id}` | Delete the row **and** the associated checkpoint rows |
 
@@ -305,8 +317,8 @@ does not create a gap in the user's memory history.
 6. **`write_memories`** — `mem0.add(messages=[user_msg, assistant_reply], user_id=uid)`.
    mem0 performs extraction on its side.
 7. **Streaming back** — the AG-UI adapter emits `RUN_STARTED` → per-node events →
-   `MESSAGES_SNAPSHOT` with the assistant reply → `RUN_FINISHED`. CopilotKit renders these
-   incrementally.
+   `MESSAGES_SNAPSHOT` with the assistant reply → `RUN_FINISHED`. assistant-ui's runtime
+   renders these incrementally.
 8. **Automatic side effects** — `PostgresSaver` persists updated conversation state under
    `thread_id`, so a reload resumes the same conversation. The conversation's `updated_at`
    is bumped so it sorts to the top of the list, and its title is set from this message if
@@ -381,8 +393,14 @@ Scoped to what protects the integration, not blanket coverage.
   LangSmith traces. Confirms the memory layer is contributing something observable rather
   than being decorative.
 
-No frontend unit tests — CopilotKit renders the chat, and testing their component is not
+No frontend unit tests — assistant-ui renders the chat, and testing their components is not
 this project's integration.
+
+**Required first frontend step: a manual smoke test.** Connect assistant-ui to the running
+`ag-ui-langgraph` endpoint, send one message, reload the page, and confirm the transcript
+rehydrates through the history adapter. Nothing in this stack has been run end to end
+against a live server, only verified at the API-shape level. No further UI work should be
+built on the assumption until this passes.
 
 ## Repo layout
 
@@ -411,7 +429,8 @@ use_mem0/
       App.tsx                 # auth gate: login screen vs. chat
       Login.tsx
       ConversationList.tsx    # sidebar: list, new, rename, delete
-      Chat.tsx                # CopilotKit provider + <CopilotChat/>, keyed by threadId
+      Chat.tsx                # AssistantRuntimeProvider + <Thread/>, keyed by threadId
+      historyAdapter.ts       # adapters.history -> GET /conversations/{id}/messages
 ```
 
 Two independent processes, one Compose file, secrets only in `.env`.
@@ -441,55 +460,111 @@ research step before planning.
 - Agent tools beyond memory — the graph has no tool-calling layer in this iteration.
 - `use_graphiti/` — a separate experiment, untouched by this spec.
 
-## Open question — resuming conversation history in the UI
+## Frontend client choice: assistant-ui over CopilotKit
 
-**Status: unresolved. Blocks the frontend portion of the implementation plan; the backend
-design above is unaffected.**
+**Status: resolved.** CopilotKit was the original choice and was rejected after research;
+this section records why, so the decision is not relitigated or accidentally reverted.
 
-Research against CopilotKit 1.69.3 and `ag-ui-langgraph` 0.0.44 found that **loading a past
-conversation's messages back into the chat UI has no working path on this stack**:
+### Why CopilotKit was rejected
 
-- `threadId` itself works. It is a top-level field of AG-UI's `RunAgentInput`, and
-  `ag-ui-langgraph` maps it unconditionally onto `config["configurable"]["thread_id"]`
-  (`agent.py:1638`), so LangGraph checkpointing keys off it correctly. Resumption works
-  *server-side* — the agent has full history.
-- **The UI cannot display that history on load.** CopilotKit's v1 `loadAgentState`
-  resolver is stubbed out in 1.69.3 (`state.resolver.mjs` returns `{}` / throws), and
-  react-core no longer issues the query. Open, unresolved:
-  [#2200](https://github.com/CopilotKit/CopilotKit/issues/2200),
-  [#2624](https://github.com/CopilotKit/CopilotKit/issues/2624). No `initialMessages` prop
-  was found.
-- `add_langgraph_fastapi_endpoint` exposes only `POST {path}` and `GET {path}/health` —
-  **no history-fetch endpoint**. `MESSAGES_SNAPSHOT` is emitted only mid-run, so history
-  arrives only after a new message is sent.
-- CopilotKit's built-in `CopilotThreadsDrawer` / `useThreads` **require CopilotKit
-  Intelligence** (licensed); without it the drawer renders a locked view and thread
-  management is entirely the application's responsibility.
+Resuming a conversation has two independent halves, and CopilotKit fails the second:
 
-No official example exists of multi-conversation history against a self-hosted
-`ag-ui-langgraph` backend without Intelligence.
+1. **Agent-side resumption works.** `threadId` is a top-level field of AG-UI's
+   `RunAgentInput`, and `ag-ui-langgraph` maps it unconditionally onto
+   `config["configurable"]["thread_id"]` (`agent.py:1638`), so LangGraph checkpointing keys
+   off it correctly and the model sees full history.
+2. **UI-side rehydration does not.** The messages live in Postgres; the browser has nothing
+   until something sends them. On conversation switch, the message list is empty.
 
-Net effect if built as currently specified: a user clicking a past conversation would see an
-**empty chat pane**, then have their history appear only after sending a new message. That
-fails the conversation-list requirement.
+CopilotKit's v1 documentation states that setting `threadId` loads previous messages, backed
+by a `loadAgentState` GraphQL resolver. In the shipped 1.69.3 package that resolver is
+**stubbed** — its agent list is hardcoded empty, so it always throws
+`CopilotKitAgentDiscoveryError` and returns `{}` — and `react-core` no longer issues the
+query. The documented behaviour is dead code. Open and unresolved:
+[#2200](https://github.com/CopilotKit/CopilotKit/issues/2200),
+[#2624](https://github.com/CopilotKit/CopilotKit/issues/2624). No `initialMessages`-style
+prop exists.
 
-### Options
+Their working alternative, `CopilotThreadsDrawer` / `useThreads`, **requires CopilotKit
+Intelligence** — a licensed tier that mirrors AG-UI events into their platform and replays
+them on resume. Their docs are explicit that without it, history is "re-derived from the
+event history, which nobody kept."
 
-1. **Custom history load into CopilotKit** — add `GET /conversations/{id}/messages` reading
-   from the checkpointer, and hydrate the UI with it. Blocked on whether CopilotKit exposes
-   any supported seam for injecting prior messages; no such prop was verified to exist, so
-   this needs a spike before it can be planned.
-2. **Hand-build the chat on `@ag-ui/client`** — full control over rendering history, at the
-   cost of writing the message list, input, and streaming indicators ourselves. Reverses the
-   earlier CopilotKit decision, which was made before this limitation was known.
-3. **CopilotKit Intelligence** — the supported path, but introduces a licensed dependency
-   and routes conversation data through their platform.
-4. **Accept the limitation** — single active conversation per session, no resumable list.
-   Contradicts the conversation-management requirement above.
+That sentence identifies the underlying issue: **the checkpointer stores LangGraph state,
+not AG-UI events.** Rich UI artifacts (rendered tool-call components, streamed reasoning,
+attachments) are not reconstructible from LangGraph state. Plain messages are — which is
+sufficient for this project, since it has no custom tool-call UI.
 
-**Recommendation: spike option 1 first** (timeboxed), since it preserves the current design;
-fall back to option 2 if no injection seam exists. Option 2 is the safe default and only
-costs frontend work, which this project has little of.
+Net effect if built on CopilotKit: clicking a past conversation shows an **empty pane** until
+the user sends a message. That fails the conversation-list requirement outright.
+
+### Why assistant-ui resolves it
+
+`@assistant-ui/react-ag-ui` exposes a **history adapter** as a first-class, documented API.
+Verified in the shipped `.d.ts`, not only in docs:
+
+```ts
+type ThreadHistoryAdapter = {
+  load(): Promise<ExportedMessageRepository & { state?: ...; unstable_resume?: boolean }>;
+  append(item: ExportedMessageRepositoryItem): Promise<void>;
+}
+```
+
+```tsx
+const agent = useMemo(() => new HttpAgent({ url: "/agent" }), []);
+const runtime = useAgUiRuntime({
+  agent,
+  adapters: {
+    history: {
+      async load() {
+        const { messages } = await fetch(`/conversations/${id}/messages`).then(r => r.json());
+        return ExportedMessageRepository.fromArray(fromAgUiMessages(messages));
+      },
+      async append({ message }) { /* persistence handled by the checkpointer */ },
+    },
+  },
+});
+return <AssistantRuntimeProvider runtime={runtime}><Thread /></AssistantRuntimeProvider>;
+```
+
+`load()` calls **our** backend. There is no vendor cloud in the path — exactly where
+CopilotKit's stubbed resolver fails. Thread switching hydrates through the same mechanism.
+
+Decisive differences:
+
+| Requirement | CopilotKit | assistant-ui |
+|---|---|---|
+| Rehydrate past conversation | ✗ non-functional | ✓ `adapters.history` |
+| Conversation list | Requires paid Intelligence | ✓ `ThreadListPrimitive`, MIT |
+| Styling | Constrained to their theme props | ✓ Headless, unstyled primitives |
+| Licence | Open-core; thread features gated | ✓ MIT throughout |
+
+Licensing verified: MIT across `@assistant-ui/react`, `react-ag-ui`, `react-markdown`, and
+the CLI. The paid tier covers only their optional hosted persistence backend, which this
+project does not use.
+
+**Hand-building on `@ag-ui/client` was the fallback and is no longer needed.** assistant-ui
+supplies the message view, composer, auto-scroll, streaming/running state, and error states
+for free, while still permitting the custom design, so it dominates hand-building on both
+effort and capability.
+
+### Backend impact: none beyond one endpoint
+
+assistant-ui wraps `@ag-ui/client`'s `HttpAgent` against the same
+`add_langgraph_fastapi_endpoint(app, graph, "/agent")` already specified. The only addition
+is `GET /conversations/{id}/messages`, reading via LangGraph's `graph.get_state(config)` —
+which the conversation-management design required regardless of frontend choice.
+
+### Caveats
+
+- The **thread-list adapter is marked `@experimental`** by its authors. The history adapter,
+  which resolves the actual blocker, is not. The application supplies its own conversation
+  sidebar against its own `/conversations` API, so this is low-exposure.
+- API shapes were verified against shipped type definitions and docs, but **nothing has been
+  run against a live `ag-ui-langgraph` server**. The first frontend implementation step must
+  be a smoke test — connect, send one message, reload, confirm history renders — before any
+  further UI is built on the assumption.
+- Markdown rendering and syntax highlighting are separate (MIT) packages, not bundled.
 
 ## Known risks
 
