@@ -13,3 +13,9 @@ The five canonical triage roles, each label string equal to its name. See `docs/
 ### Domain docs
 
 Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Dispatching tickets
+
+`scripts/dispatch-issues.sh` runs open issues as parallel headless agents — one
+worktree, branch, and PR per ticket, ordered by the `Depends on #N` graph. See
+`docs/agents/dispatching.md`.

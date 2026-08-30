@@ -219,3 +219,6 @@ __marimo__/
 
 # Sandbox
 .sandbox
+
+# Dispatch run state (logs, prompts, per-ticket status)
+.dispatch/
