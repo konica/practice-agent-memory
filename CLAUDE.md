@@ -16,6 +16,6 @@ Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/
 
 ### Dispatching tickets
 
-`scripts/dispatch-issues.sh` runs open issues as parallel headless agents — one
-worktree, branch, and PR per ticket, ordered by the `Depends on #N` graph. See
-`docs/agents/dispatching.md`.
+Working the backlog with agents is the `dispatching-github-issues` skill
+(`.claude/skills/dispatching-github-issues/`). Tickets declare their blockers
+with a `Depends on #N` line, which is what the dispatcher orders them by.

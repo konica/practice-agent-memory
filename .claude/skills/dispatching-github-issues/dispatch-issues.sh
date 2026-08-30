@@ -11,7 +11,7 @@
 # branch. A ticket whose blocker is being worked on in the same run is
 # branched off that blocker's branch (stacked), so it sees the blocker's code.
 #
-# See docs/agents/dispatching.md.
+# See reference.md next to this script for the full guide.
 
 set -euo pipefail
 
@@ -42,6 +42,8 @@ BRANCH_PREFIX="agent/issue-"
 WORKTREE_ROOT_OPT=""
 AGENT_CMD=""
 PROMPT_TEMPLATE_FILE=""
+REPO_OPT=""
+DEP_WORDS="depends on|blocked by|requires|needs"
 
 usage() {
   cat <<HELPTEXT
@@ -53,6 +55,7 @@ USAGE
 With no issue numbers, every open issue is a candidate (narrow with --label).
 
 SELECTION
+  -r, --repo OWNER/NAME which repository (default: inferred from the checkout)
   -l, --label LABEL     only issues carrying LABEL (repeatable, AND-ed)
       --limit N         issues to fetch from GitHub (default $LIMIT)
   -f, --force           dispatch even if assigned or the branch already exists
@@ -74,6 +77,9 @@ AGENT
       --prompt-file F   prompt template; placeholders {{NUMBER}} {{TITLE}}
                         {{BODY}} {{BRANCH}} {{BASE}} {{REPO}}
       --branch-prefix P branch naming, default $BRANCH_PREFIX<number>
+      --dep-words RE    alternation of phrases that introduce a blocker
+                        reference in an issue body
+                        (default: $DEP_WORDS)
       --worktree-root D where ticket worktrees live
                         (default .claude/worktrees/dispatch in the repo)
 
@@ -100,6 +106,8 @@ log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 
 while (($#)); do
   case $1 in
+    -r|--repo)      REPO_OPT=${2:?}; shift 2 ;;
+    --dep-words)    DEP_WORDS=${2:?}; shift 2 ;;
     -l|--label)     LABELS+=("${2:?--label needs a value}"); shift 2 ;;
     --limit)        LIMIT=${2:?}; shift 2 ;;
     -f|--force)     FORCE=1; shift ;;
@@ -142,10 +150,14 @@ fi
 git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
 GIT_COMMON=$(git rev-parse --git-common-dir)
 MAIN_ROOT=$(cd "$(dirname "$GIT_COMMON")" && pwd)
-REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner) \
-  || die "could not resolve the GitHub repo (is gh authenticated?)"
+if [[ -n $REPO_OPT ]]; then
+  REPO=$REPO_OPT
+else
+  REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner) \
+    || die "could not resolve the GitHub repo (pass --repo, or check gh auth)"
+fi
 if [[ -z $BASE ]]; then
-  BASE=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)
+  BASE=$(gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)
 fi
 BASE_BRANCH=$BASE
 
@@ -224,10 +236,11 @@ has_all_labels() {
 }
 
 # Blockers declared in the body: "Depends on #3, #4" / "Blocked by: #3".
+# Which phrases count is configurable with --dep-words, since trackers differ.
 body_blockers() {
   local n=$1
   printf '%s\n' "${I_BODY[$n]:-}" \
-    | grep -oiE '(depends on|blocked by)[^.]*' \
+    | grep -oiE "($DEP_WORDS)[^.]*" \
     | grep -oE '#[0-9]+' \
     | tr -d '#' \
     | sort -un || true          # no match is normal, not an error
@@ -294,8 +307,9 @@ You are an autonomous engineer implementing GitHub issue #{{NUMBER}} in {{REPO}}
 
 - Your working directory is a dedicated git worktree on branch `{{BRANCH}}`,
   branched from `{{BASE}}`. Everything you need is here.
-- Read `CLAUDE.md` and `docs/agents/*.md` first and follow this repo's
-  conventions, vocabulary, and domain docs.
+- Read this repository's agent instructions first — whichever of `CLAUDE.md`,
+  `AGENTS.md`, `CONTRIBUTING.md`, `README.md`, or a `docs/` guide exist — and
+  follow the conventions and vocabulary they set.
 - Implement exactly what this issue asks. Do not start work that belongs to
   another ticket, and do not refactor unrelated code.
 - Write the tests the issue names, and run them. Report real results — if a
