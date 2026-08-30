@@ -159,7 +159,10 @@ fi
 if [[ -z $BASE ]]; then
   BASE=$(gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)
 fi
-BASE_BRANCH=$BASE
+# A base like `origin/main` is a valid branch point but not a valid PR base on
+# GitHub, which wants the branch name. Keep both forms.
+BASE_BRANCH=${BASE#refs/remotes/}
+BASE_BRANCH=${BASE_BRANCH#origin/}
 
 STATE_DIR=$MAIN_ROOT/.dispatch
 WORKTREE_ROOT=${WORKTREE_ROOT_OPT:-$MAIN_ROOT/.claude/worktrees/dispatch}
@@ -449,8 +452,12 @@ run_ticket() {
 
   local pr_url=""
   if ((DO_PR)); then
+    # Stacked tickets target their blocker's branch; first-wave tickets target
+    # the trunk under the name GitHub knows it by.
+    local pr_base=$base
+    [[ $pr_base == "$BASE" ]] && pr_base=$BASE_BRANCH
     pr_url=$(gh pr create --repo "$REPO" \
-      --head "$branch" --base "$base" \
+      --head "$branch" --base "$pr_base" \
       --title "${I_TITLE[$n]} (#$n)" \
       --body "Closes #$n
 
