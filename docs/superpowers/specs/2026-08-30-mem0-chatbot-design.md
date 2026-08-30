@@ -136,6 +136,21 @@ component inherits the design automatically. Primitives that carry focus managem
 behaviour (dialog, dropdown, scroll area) come from shadcn rather than being hand-rolled —
 which matters most for the delete confirmation, the guard on an irreversible action.
 
+The canonical token list lives in the implementation plan (Task 11), supplied by the designer
+from the mockup source. It must not be re-derived by inspecting the rendered mockup: an
+extraction attempt produced a `--destructive` value absent from the design, mislabelled an
+avatar-placeholder fill as the systemic accent, and collapsed two scales into single values.
+Three properties resist naive extraction and are easy to get wrong:
+
+- **Radius is a scale**, not one value — 6px inputs, 7px marks, 9–10px controls, 12–14px
+  cards, 16px the sign-in logo mark.
+- **Bubble radius is directional** — `14px 14px 2px 14px` for user, `14px 14px 14px 2px` for
+  assistant. The sharp corner is the tail and mirrors the alignment side.
+- **"Destructive" is a family, not a token** — an action colour plus a separate banner
+  background, border, and message text.
+
+Typography is Plus Jakarta Sans, a deliberate choice rather than an incidental value.
+
 The UI is otherwise deliberately minimal — no in-app memory inspector and no per-message
 trace links.
 Memory writes are inspected in the mem0 dashboard and traces in the LangSmith UI. Visual

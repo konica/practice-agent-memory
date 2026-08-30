@@ -41,9 +41,14 @@ Every task's requirements implicitly include this section.
 - **mem0 client calls need `@traceable`** to appear in LangSmith traces; they are plain SDK
   calls, not LangChain runnables, so they are not auto-traced.
 - **Secrets only in `.env`.** Never commit real keys. `.env` must be gitignored.
-- **Design tokens from the mockup** (use verbatim): background `#FAF9F6`, surface `#F4F1EA`,
-  text `#21201C`, muted text `#6B675F`, border `#E7E4DD`, accent `#2E6F7E`. Message bubble
-  radius `14px`, message column `max-width: 640px`, sidebar width `260px`.
+- **Design tokens from the mockup** — the canonical list is in Task 11 Step 3, supplied by
+  the designer from the mockup source. Use it verbatim; do not re-derive values by inspecting
+  the rendered mockup, which produced three wrong values on a previous attempt.
+  Two traps in particular: **radius is a scale, not one value**, and **bubble radius is
+  directional** (`14px 14px 2px 14px` user / `14px 14px 14px 2px` assistant — the sharp
+  corner is the tail and mirrors the alignment side).
+- **Font is Plus Jakarta Sans** (Google Fonts, weights 400/500/600/700/800), fallback
+  `system-ui, sans-serif`. A deliberate choice — not Inter, Roboto, or Arial.
 - **Styling is Tailwind utility classes over shadcn/ui components.** The mockup's palette is
   applied by overriding shadcn's CSS variable *values* while keeping its variable *names*, so
   every generated component inherits the design automatically. Never inline `style` objects,
@@ -2297,9 +2302,15 @@ Replace the colour variables shadcn generated in `src/index.css` with the approv
 values. Keep shadcn's variable *names* — its components reference them — and change only the
 values, so every generated component inherits our palette automatically:
 
+Values below are the designer's canonical list, confirmed against the mockup source. Do not
+re-derive them from the rendered artifact.
+
 ```css
 /* use_mem0/frontend/src/index.css — palette from the approved mockup */
+@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap");
+
 :root {
+  /* shadcn semantic tokens — names kept, values replaced */
   --background: #FAF9F6;
   --foreground: #21201C;
   --card: #FAF9F6;
@@ -2312,32 +2323,60 @@ values, so every generated component inherits our palette automatically:
   --secondary-foreground: #21201C;
   --muted: #F4F1EA;
   --muted-foreground: #6B675F;
-  --accent: #EFEBE3;
+  --accent: #E9E2D3;            /* active sidebar item fill */
   --accent-foreground: #21201C;
-  --destructive: #B3402B;
+  --destructive: #9C4A2E;       /* delete button, retry button, error icon */
   --destructive-foreground: #FFFFFF;
   --border: #E7E4DD;
   --input: #E7E4DD;
   --ring: #2E6F7E;
-  --radius: 0.625rem; /* 10px controls */
+
+  /* radius scale — NOT a single value */
+  --radius-sm: 6px;             /* rename input */
+  --radius-mark: 7px;           /* avatar and logo marks */
+  --radius: 10px;               /* interactive controls: buttons, conversation items, popovers */
+  --radius-card: 13px;          /* cards and modals */
+  --radius-logo: 16px;          /* sign-in logo mark */
+
+  /* message bubbles — directional; the sharp corner is the tail */
+  --radius-bubble-user: 14px 14px 2px 14px;
+  --radius-bubble-assistant: 14px 14px 14px 2px;
+
+  /* error family — "destructive" is not one token in this design */
+  --error-bg: #FBF1EC;
+  --error-border: #E7CFC4;
+  --error-text: #8A3F27;
+
+  /* project-specific */
+  --sidebar-width: 260px;
+  --message-max-width: 640px;
+  --bubble-user-bg: #EAF2F1;
+  --bubble-skeleton-bg: #ECE8DF;
+  --text-tertiary: #9A968C;     /* placeholder and caption text */
+  --text-account: #4B4740;      /* sidebar account-row name */
+  --avatar-placeholder-bg: #EFEBE3;
 }
 
 body {
+  font-family: "Plus Jakarta Sans", system-ui, sans-serif;
   font-size: 14.5px;
   line-height: 1.55;
 }
 ```
 
-Add the project-specific dimensions that are not part of shadcn's token set. Define them
-alongside the above:
+**Typography is a deliberate choice, not an incidental value.** The mockup specifies Plus
+Jakarta Sans (weights 400/500/600/700/800) with a `system-ui, sans-serif` fallback —
+explicitly not Inter, Roboto, or Arial. Configure it as the sans font in the Tailwind theme
+so `font-sans` resolves to it.
 
-```css
-:root {
-  --sidebar-width: 260px;
-  --message-max-width: 640px;
-  --radius-bubble: 14px;
-}
-```
+**Two values that must not be collapsed:**
+
+- **Radius is a scale**, not one number. Controls sit at 9–10px, marks at 7px, the rename
+  input at 6px, cards and modals at 12–14px, the sign-in logo mark at 16px. `--radius: 10px`
+  is the base default; do not apply it uniformly.
+- **Bubble radius is directional.** Three corners at 14px and one sharp corner at 2px, and
+  the sharp corner mirrors the side the bubble is aligned to — it is the tail. A flat
+  `border-radius: 14px` loses the design.
 
 **All components in this and later tasks use Tailwind utility classes**, referencing these
 tokens (`bg-background`, `text-muted-foreground`, `border-border`, and so on) rather than
@@ -2641,7 +2680,8 @@ git commit -m "feat: wire assistant-ui to ag-ui endpoint with history rehydratio
 - Sidebar width `260px`, "+ New chat" at the top, account and sign-out at the **bottom**.
 - Conversation titles truncate with a single-line CSS ellipsis; do not truncate in JS. The
   backend's 50-character title cap and the display truncation are independent.
-- The active conversation is marked by a **background fill**, not a left border accent.
+- The active conversation is marked by a **background fill** (`--accent`, `#E9E2D3` — a
+  distinct value from the `#F4F1EA` sidebar background), not a left border accent.
 - A `⋮` affordance appears on hover, opening a menu with Rename and Delete. Dismissal on
   outside-click comes free from shadcn's `DropdownMenu` — do not hand-roll a document
   click listener.
@@ -2782,7 +2822,7 @@ export function ConversationList({
                     if (event.key === "Escape") setRenamingId(null);
                   }}
                   onClick={(event) => event.stopPropagation()}
-                  className="h-7 flex-1 text-[13.5px]"
+                  className="h-7 flex-1 rounded-[6px] text-[13.5px]"
                 />
               ) : (
                 <span className="flex-1 truncate text-[13.5px]">{label}</span>
@@ -2893,13 +2933,13 @@ export function Workspace({ user }: { user: User }) {
         </ScrollArea>
 
         <div className="flex items-center gap-2 border-t border-border pt-2.5">
-          <Avatar className="h-6 w-6">
+          <Avatar className="h-6 w-6 rounded-[7px]">
             {user.picture && <AvatarImage src={user.picture} alt="" />}
-            <AvatarFallback className="text-[10px]">
+            <AvatarFallback className="rounded-[7px] bg-[var(--avatar-placeholder-bg)] text-[10px]">
               {(user.name ?? user.email).slice(0, 1).toUpperCase()}
             </AvatarFallback>
           </Avatar>
-          <span className="flex-1 truncate text-[12.5px] text-muted-foreground">
+          <span className="flex-1 truncate text-[12.5px] text-[var(--text-account)]">
             {user.name ?? user.email}
           </span>
           <Button
@@ -2981,17 +3021,24 @@ task makes it look like the approved design. Those are separate concerns and sep
 review gates.
 
 **Design requirements from the approved mockup:**
-- Message column `max-width: 640px`, centred.
-- Message bubbles use `--radius-bubble` (14px). User and assistant bubbles are visually
-  distinct — user on `bg-primary`/`text-primary-foreground`, assistant on
-  `bg-secondary`/`text-secondary-foreground`.
-- A small square avatar mark sits beside assistant messages **and** beside the typing
-  indicator, so the assistant's identity is consistent between streaming and settled states.
+- Message column `max-width: var(--message-max-width)` (640px), centred.
+- **Bubble radius is directional** — `var(--radius-bubble-user)` /
+  `var(--radius-bubble-assistant)`. Three corners at 14px, one sharp at 2px, and the sharp
+  corner mirrors the side the bubble aligns to. In Tailwind use an arbitrary value:
+  `rounded-[14px_14px_2px_14px]`. A flat `rounded-[14px]` loses the tail and is wrong.
+- **User bubbles use `var(--bubble-user-bg)` (`#EAF2F1`), a light teal — not solid
+  `--primary`.** Text stays `--foreground`. Assistant bubbles use `--secondary`.
+- A small avatar mark (radius `var(--radius-mark)`, 7px) sits beside assistant messages
+  **and** beside the typing indicator, so the assistant's identity is consistent between
+  streaming and settled states.
 - The composer is custom-styled, not a default input.
-- A `~450ms` skeleton shows while a conversation's history loads on switch. Real network
-  latency exists even when rehydration works, so this is an honest loading state rather
-  than cover for a gap.
-- Failed replies render an error state with a working Retry action.
+- A `~450ms` skeleton shows while a conversation's history loads on switch, using
+  `var(--bubble-skeleton-bg)` (`#ECE8DF`). Real network latency exists even when rehydration
+  works, so this is an honest loading state rather than cover for a gap.
+- Failed replies render an error banner using the error family — background
+  `var(--error-bg)`, border `var(--error-border)`, message text `var(--error-text)` — with
+  the Retry button and error icon in `var(--destructive)`. Note this is **four distinct
+  values, not one destructive colour**.
 
 - [ ] **Step 1: Compose the styled thread**
 
