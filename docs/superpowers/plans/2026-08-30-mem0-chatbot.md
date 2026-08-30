@@ -13,7 +13,7 @@ Vite frontend uses assistant-ui to render the chat and rehydrates transcripts th
 history adapter that calls our own backend.
 
 **Tech Stack:** Python 3.11+, FastAPI, LangGraph, `langgraph-checkpoint-postgres`, `mem0ai`,
-`langsmith`, OpenAI, Postgres 16 (Docker), React 18, Vite, TypeScript,
+`langsmith`, OpenAI, Postgres 16 (Docker), **React 19**, Vite, TypeScript,
 `@assistant-ui/react`, `@assistant-ui/react-ag-ui`, `ag-ui-protocol`, `ag-ui-langgraph`,
 **Tailwind CSS + shadcn/ui**.
 
@@ -56,6 +56,17 @@ Every task's requirements implicitly include this section.
   provides — those bring focus management and ARIA behaviour with them.
 - **shadcn component source in `src/components/ui/` is ours to edit.** It is copied in, not a
   vendored dependency; editing it directly is the intended workflow.
+- **React 19 is required**, not React 18. shadcn v4 components are written as plain function
+  components typed `React.ComponentProps<"div">` and rely on React 19 passing `ref` through
+  props. On React 18 the ref never reaches the DOM node, which silently breaks assistant-ui's
+  hover tracking and anchor registration when its primitives wrap them via `asChild`.
+- **Do NOT install shadcn's `message-scroller`.** It conflicts with assistant-ui's
+  `ThreadPrimitive.Viewport` — both write `scrollTop` on their own element, and pointing both
+  at the same node gives two engines fighting over scroll position. See
+  [Task 14](#task-14-chat-surface-styling).
+- **assistant-ui state is read through `useAuiState(selector)`.** There is no `useMessage()`
+  or `useThread()` hook in 0.15.17 — those names do not exist. Returning the whole state
+  object from the selector throws; always select a field.
 - **Delete is always an explicit confirmation step.** Never a one-click destructive action,
   and never offer an undo affordance — the confirmation copy promises permanence.
 
@@ -107,13 +118,8 @@ use_mem0/
       Workspace.tsx             # sidebar + chat layout
       ConversationList.tsx      # list, new, inline rename, delete dialog
       DeleteDialog.tsx
-      Chat.tsx                  # AssistantRuntimeProvider + composed thread
-      chat/                     # styled assistant-ui primitives (Task 14)
-        ThreadView.tsx
-        UserMessage.tsx
-        AssistantMessage.tsx
-        Composer.tsx
-        LoadingSkeleton.tsx
+      Chat.tsx                  # AssistantRuntimeProvider + Thread
+      components/assistant-ui/  # from r.assistant-ui.com registry, edited in place (Task 14)
       historyAdapter.ts         # adapters.history -> GET /conversations/{id}/messages
 ```
 
@@ -3009,7 +3015,8 @@ git commit -m "feat: add conversation sidebar with inline rename and delete conf
 
 **Files:**
 - Modify: `use_mem0/frontend/src/Chat.tsx`
-- Create: `use_mem0/frontend/src/chat/` — composed assistant-ui primitives
+- Create: `use_mem0/frontend/src/components/assistant-ui/*` (installed by `shadcn add`, then
+  edited in place)
 
 **Interfaces:**
 - Consumes: assistant-ui primitives, the shadcn tokens from Task 11.
@@ -3040,35 +3047,118 @@ review gates.
   the Retry button and error icon in `var(--destructive)`. Note this is **four distinct
   values, not one destructive colour**.
 
-- [ ] **Step 1: Compose the styled thread**
+### Verified integration facts
 
-Replace the bare `<Thread />` with assistant-ui's composable primitives, which accept
-`className` and `asChild` in the Radix style. Follow the structure in assistant-ui's
-docs for `ThreadPrimitive`, `MessagePrimitive`, and `ComposerPrimitive`, applying the
-tokens from Task 11.
+These were confirmed against shipped source and type definitions. They are not inferences.
 
-Keep each piece in its own file under `src/chat/` (`ThreadView.tsx`, `UserMessage.tsx`,
-`AssistantMessage.tsx`, `Composer.tsx`, `LoadingSkeleton.tsx`) rather than one large
-component — these are edited independently and reviewed independently.
+**assistant-ui publishes its own shadcn registry** — 148 items at `r.assistant-ui.com`,
+including a complete pre-styled `thread` component that already composes
+`ThreadPrimitive.Viewport` and `MessagePrimitive.Root` internally:
 
-- [ ] **Step 2: Add the history-loading skeleton**
+```bash
+npx shadcn@latest add https://r.assistant-ui.com/thread.json
+npx shadcn@latest add https://r.assistant-ui.com/thread-list.json
+```
+
+This is the starting point. It lands editable source in `src/components/assistant-ui/` and
+depends only on shadcn's `button` and `skeleton`.
+
+**shadcn's `message`, `bubble`, `marker`, `attachment` compose cleanly.** They are pure
+presentational divs — `React.ComponentProps<"div">` plus variants, no data binding, no
+`useChat`. They drop under assistant-ui primitives via `asChild`:
+
+```tsx
+<MessagePrimitive.Root asChild>
+  <Message align="end">
+    <Bubble>…</Bubble>
+  </Message>
+</MessagePrimitive.Root>
+```
+
+`asChild` is declared on all 17 assistant-ui primitive nodes, and prop/ref merging through
+Radix `Slot` was runtime-verified.
+
+**`message-scroller` is excluded.** It and `ThreadPrimitive.Viewport` each own scroll on
+their own element — both write `scrollTop` and attach their own `ResizeObserver` /
+`IntersectionObserver`. Using both on one node produces two engines fighting over scroll
+position. Keep assistant-ui's `Viewport`, which is what its registry components already use.
+
+Accepted cost: no `scroll-fade`, jump-to-message, or prepend-preservation from shadcn. A
+`<ThreadPrimitive.Viewport autoScroll={false} asChild><MessageScroller.Root>` inversion
+typechecks but has not been run — do not attempt it in this task.
+
+**Reading message state** uses a selector store:
+
+```tsx
+const role = useAuiState((s) => s.message.role);
+const isRunning = useAuiState((s) => s.thread.isRunning);
+```
+
+There is no `useMessage()` or `useThread()`. Selecting the whole state object throws.
+Message parts have dedicated hooks: `useMessagePartText`, `useMessagePartImage`,
+`useMessagePartFile`, `useMessagePartReasoning`.
+
+- [ ] **Step 1: Install assistant-ui's registry components**
+
+Run the two `shadcn add` commands above, then replace the bare `<Thread />` from Task 12
+with the installed `Thread` component. Confirm the app still sends and receives a message
+before styling anything.
+
+- [ ] **Step 2: Apply the design tokens**
+
+The registry components use the standard shadcn token contract, so the palette from Task 11
+Step 3 already flows through. Edit the installed source in `src/components/assistant-ui/`
+directly for anything the tokens do not cover — in particular the **directional bubble
+radius**, which no token contract expresses:
+
+```tsx
+// user bubble
+className="rounded-[14px_14px_2px_14px] bg-[var(--bubble-user-bg)] text-foreground"
+// assistant bubble
+className="rounded-[14px_14px_14px_2px] bg-secondary text-secondary-foreground"
+```
+
+Constrain the message column with `max-w-[var(--message-max-width)] mx-auto`.
+
+- [ ] **Step 3: Add the assistant avatar mark**
+
+A `var(--radius-mark)` (7px) square mark beside assistant messages and beside the typing
+indicator. Gate it on role:
+
+```tsx
+const role = useAuiState((s) => s.message.role);
+{role === "assistant" && <AssistantMark />}
+```
+
+The typing indicator must render the same mark, so the assistant's identity is consistent
+between streaming and settled states.
+
+- [ ] **Step 4: Add the history-loading skeleton**
 
 Render the skeleton while the history adapter's `load()` is in flight, keyed on `threadId`
-so it appears on every conversation switch.
+so it appears on every conversation switch. Use `var(--bubble-skeleton-bg)` (`#ECE8DF`).
+shadcn's `skeleton` component is already installed as a dependency of the registry thread.
 
-- [ ] **Step 3: Add the error and retry state**
+- [ ] **Step 5: Add the error and retry state**
 
-Surface a failed run with the mockup's error treatment and a Retry action that re-sends the
-last user message. Verify against a real failure by setting `OPENAI_API_KEY` to an invalid
-value.
+Surface a failed run with the mockup's error treatment — banner background
+`var(--error-bg)`, border `var(--error-border)`, message text `var(--error-text)`, Retry
+button and icon in `var(--destructive)`. Retry re-sends the last user message.
 
-- [ ] **Step 4: Verify against the mockup**
+Verify against a real failure by setting `OPENAI_API_KEY` to an invalid value and sending a
+message.
+
+- [ ] **Step 6: Verify against the mockup**
 
 Compare each artboard side by side with the running app: default conversation, empty
 conversation, zero-conversations first login, and the error state. Confirm the palette,
-bubble radius, column width, and avatar placement match.
+directional bubble radius, column width, and avatar mark placement match.
 
-- [ ] **Step 5: Commit**
+Also confirm scrolling behaves: new messages stick to the bottom while streaming, and
+switching conversations does not leave the viewport stranded mid-thread. Scroll is the one
+place where this task's library choices could go wrong at runtime.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add use_mem0/frontend/src
