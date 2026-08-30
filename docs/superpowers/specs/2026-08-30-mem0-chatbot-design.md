@@ -85,7 +85,8 @@ display purposes only.
   id token, upsert user, set session cookie), `/auth/me` (session check for the frontend).
 - `agent/` — the LangGraph graph, three nodes in fixed order:
   - `retrieve_memories` — searches mem0 scoped to `user_id`, folds results into the system
-    prompt for this turn only.
+    prompt for this turn only. Skipped entirely when `memory_enabled` is false (see
+    [Memory toggle](#memory-toggle)).
   - `call_model` — OpenAI chat completion.
   - `write_memories` — writes the turn's exchange back to mem0 under `user_id`.
 
@@ -121,7 +122,51 @@ LANGSMITH_PROJECT
 GOOGLE_CLIENT_ID
 GOOGLE_CLIENT_SECRET
 DATABASE_URL
+MEMORY_RETRIEVAL_ENABLED=true   # default for the memory toggle
 ```
+
+## Memory semantics
+
+Storing and retrieving a memory is the easy half of a memory layer. These two requirements
+cover the half that is actually hard, and both are acceptance criteria rather than
+implementation details.
+
+### Memory conflict handling
+
+Users contradict themselves over time: "I'm vegetarian" in one session, "actually I eat
+fish now" three sessions later. The system must have a defined answer for what happens
+when stored memories disagree.
+
+**Decision for this iteration: observe, do not resolve.** `retrieve_memories` passes
+mem0's results into the system prompt neutrally, without deduplication, recency weighting,
+or contradiction-filtering logic of our own. Whatever mem0 returns is what the model sees.
+
+This is deliberate. mem0 performs its own extraction and consolidation on `add`, and we do
+not yet know empirically whether it updates a superseded memory, stores both, or surfaces
+both on search. Building resolution logic before observing that behaviour would mask the
+very semantics this project exists to learn. The contradiction scenario in the acceptance
+tests exists to produce that observation.
+
+**Follow-up, once observed:** if mem0 returns contradictory memories rather than
+reconciling them, a resolution strategy becomes a real requirement — most likely presenting
+memories to the model with recency information and instructing it to prefer the most
+recent. That decision is deferred until there is evidence for it, and the finding should be
+recorded in the README.
+
+### Memory toggle
+
+A boolean `memory_enabled` field on the graph's input state controls whether
+`retrieve_memories` runs. It defaults from `MEMORY_RETRIEVAL_ENABLED` and is read per
+request, so flipping it does not require a restart.
+
+The purpose is comparison: run the same prompt with recall on and off and see what memory
+is actually contributing. Keeping the flag in graph state rather than reading the
+environment inside the node means the "retrieval is skipped" unit test sets one field
+instead of patching the environment, and it costs no frontend work — the UI stays exactly
+as designed.
+
+Writes are unaffected by the toggle. `write_memories` always runs, so a comparison session
+does not create a gap in the user's memory history.
 
 ## Data flow — one chat turn
 
@@ -146,7 +191,9 @@ DATABASE_URL
    filtering. LangSmith recognises `thread_id` (or `session_id`) as a first-class grouping
    key; `user_id` is an arbitrary metadata key, filterable via trace query syntax.
 4. **`retrieve_memories`** — `mem0.search(query=<latest user message>,
-   filters={"user_id": uid})`, results folded into this turn's system prompt.
+   filters={"user_id": uid})`, results folded into this turn's system prompt neutrally, in
+   the order mem0 returned them. Skipped when `memory_enabled` is false, in which case the
+   turn proceeds with no recall.
 5. **`call_model`** — OpenAI call using that system prompt, the message history LangGraph
    restored from the checkpointer, and the new user message.
 6. **`write_memories`** — `mem0.add(messages=[user_msg, assistant_reply], user_id=uid)`.
@@ -189,7 +236,9 @@ Scoped to what protects the integration, not blanket coverage.
 
 - **Unit, external calls mocked** — each graph node in isolation: that `retrieve_memories`
   builds the system prompt correctly from mem0 results and degrades to empty on a mem0
-  exception; that `write_memories` passes the right `user_id` and swallows failures.
+  exception; that it is skipped entirely when `memory_enabled` is false while
+  `write_memories` still runs; that `write_memories` passes the right `user_id` and
+  swallows failures.
 - **Graph-level, OpenAI and mem0 mocked** — one full `graph.invoke` asserting node order
   and that the checkpointer persists state under `thread_id`.
 - **Integration, real Postgres** (Compose container, throwaway DB) — a two-turn
@@ -202,6 +251,23 @@ Scoped to what protects the integration, not blanket coverage.
   3. Log in as user B; confirm A's memories do not leak.
   4. Confirm both turns appear as grouped threads in LangSmith and the memories appear in
      the mem0 dashboard.
+- **Manual contradiction scenario** — the observation exercise behind
+  [Memory conflict handling](#memory-conflict-handling):
+  1. As user A, state a preference ("I'm vegetarian").
+  2. In a later conversation, contradict it ("actually I eat fish now").
+  3. In a third conversation, ask a question that depends on the answer ("suggest me
+     dinner").
+  4. Inspect the mem0 dashboard: did mem0 update the original memory, store both, or keep
+     them separate? Inspect the LangSmith trace: what did `retrieve_memories` actually
+     return, and did the model follow the newer statement?
+
+  There is no pass/fail assertion here — the deliverable is a recorded finding in the
+  README describing mem0's observed consolidation behaviour, which then informs whether a
+  resolution strategy is needed.
+- **Manual memory-value comparison** — ask an identical, memory-dependent question with
+  `MEMORY_RETRIEVAL_ENABLED` true and false, and compare the two replies and their
+  LangSmith traces. Confirms the memory layer is contributing something observable rather
+  than being decorative.
 
 No frontend unit tests — CopilotKit renders the chat, and testing their component is not
 this project's integration.
@@ -235,6 +301,22 @@ use_mem0/
 ```
 
 Two independent processes, one Compose file, secrets only in `.env`.
+
+## Planned second iteration
+
+Deliberately excluded from this spec, but expected next — recorded here so they are not
+rediscovered as surprises. **Both require verifying mem0 API surfaces that this design work
+did not confirm** (only `add` and `search` were verified against the docs), so each needs a
+research step before planning.
+
+- **Explicit forget capability.** The ability to say "forget that I mentioned my address."
+  A memory system that can only accumulate is a liability, and this forces engagement with
+  mem0's delete/update API rather than only `add`/`search`. Needs verification of mem0's
+  delete and update endpoints.
+- **Control over what gets extracted.** mem0 performs its own extraction on `add`, and this
+  design gives it no steer, so it may store things the user would rather it did not.
+  Deciding whether to constrain extraction via custom instructions or categories is a real
+  requirements question. Needs verification that mem0 Platform exposes such controls.
 
 ## Out of scope
 
