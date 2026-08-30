@@ -31,15 +31,35 @@ Blockers come from two places:
    `issue_dependencies_summary.blocked_by` is non-zero is held back. Turn this
    off with `--no-native-deps`.
 
+## Two modes
+
+**Session mode (the default)** gives each ticket an attachable Claude Code
+session: the script prepares the worktree, launches `claude --bg` inside it,
+prints the `claude attach <id>` command, and exits. The agents keep working
+while you watch or steer any of them. Nothing is pushed and no PR is opened
+until you say so with `--land`. Because the wave's agents are still alive when
+the script exits, session mode dispatches **one wave per invocation**.
+
+`--status` shows what each session is doing (`working`, `done`, `gone`) and how
+many commits its branch carries. `--land` refuses a session that is mid-turn,
+so it is safe to run at any time; landed tickets are skipped on a re-run
+because `gh pr view` finds the existing PR.
+
+**Print mode** (`--mode print`) is the headless alternative: each agent runs to
+completion with no session to attach to, its work is landed immediately, and
+waves chain automatically inside one invocation. Use it for unattended runs.
+
 ## How parallelism and stacking work
 
 The script dispatches in **waves**. Wave 1 is every ready ticket; they run
-concurrently, capped by `--jobs`. When the wave finishes, readiness is
-recomputed and the next wave goes out, until nothing is left.
+concurrently, capped by `--jobs`. In print mode, when the wave finishes,
+readiness is recomputed and the next wave goes out until nothing is left; in
+session mode you land the wave and run the script again.
 
-A blocker counts as cleared once its agent has **succeeded in this run** — not
-only when the issue is closed. Waiting for a merge would stall the whole run
-behind code review.
+A blocker counts as cleared once its **branch carries commits** — not only when
+the issue is closed. Waiting for a merge would stall the whole run behind code
+review, and reading the branch rather than in-memory state is what lets a
+second invocation pick up where the first left off.
 
 That raises an obvious problem: ticket #2's code depends on #1's code, but #1
 is not on `main` yet. So dependent work is **stacked**. #2's worktree is branched
@@ -81,14 +101,19 @@ Check the shape of a run before committing to it:
 | `--timeout SECS`     | kill an agent that won't finish                            |
 | `--no-pr`            | push branches, skip pull requests                          |
 | `--no-push`          | keep everything local (implies `--no-pr`)                  |
-| `--agent-cmd CMD`    | run CMD instead of `claude`; the prompt arrives on stdin   |
+| `--agent-cmd CMD`    | print mode only: run CMD instead of `claude`               |
+| `--mode MODE`        | `session` (default, attachable) or `print` (headless)      |
+| `--status`           | session id, state and commit count per dispatched ticket   |
+| `--land`             | push branches and open PRs for finished sessions           |
 | `-r, --repo O/N`     | target repository, when `gh` cannot infer it               |
 | `--dep-words RE`     | phrases that introduce a blocker in an issue body          |
 | `--worktree-root D`  | put worktrees somewhere other than the repo                |
 
 ## What each agent gets
 
-A prompt built from the issue title and body, plus a working agreement: read
+A prompt whose **first line is `#<n> <title>`** — that line becomes the
+session's name in `claude agents`, so a wave is readable at a glance — followed
+by the issue body and a working agreement: read
 whatever agent instructions the repository carries (`CLAUDE.md`, `AGENTS.md`,
 `CONTRIBUTING.md`, a `docs/` guide), implement only this ticket, write and run
 the tests the ticket names, commit on the branch, and **do not push, open a PR,
@@ -101,9 +126,11 @@ Override the template with `--prompt-file`; placeholders are `{{NUMBER}}`,
 
 ## After a ticket
 
-On success the script commits anything the agent left uncommitted, pushes
-`agent/issue-<n>`, opens a PR whose body says `Closes #<n>`, comments the PR
-link on the issue, and assigns the issue to you. A ticket that fails, produces
+Landing (either `--land`, or automatically at the end of a print-mode ticket)
+commits anything the agent left uncommitted, pushes `agent/issue-<n>`, opens a
+PR whose body says `Closes #<n>`, and comments the PR link on the issue. The
+issue is assigned to you when the ticket is first dispatched, which is also
+what stops a second run from dispatching it twice. A ticket that fails, produces
 no commits, or cannot push is reported and leaves its dependents unattempted —
 they show as `NOT REACHED` in the summary.
 

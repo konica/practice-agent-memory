@@ -42,6 +42,8 @@ BRANCH_PREFIX="agent/issue-"
 WORKTREE_ROOT_OPT=""
 AGENT_CMD=""
 PROMPT_TEMPLATE_FILE=""
+MODE=session
+ACTION=dispatch
 REPO_OPT=""
 DEP_WORDS="depends on|blocked by|requires|needs"
 
@@ -60,8 +62,15 @@ SELECTION
       --limit N         issues to fetch from GitHub (default $LIMIT)
   -f, --force           dispatch even if assigned or the branch already exists
 
+WHAT TO DO
+      --mode MODE       session (default): one attachable background session
+                        per ticket, which you can steer with 'claude attach'.
+                        print: headless agent that runs to completion.
+      --land            land finished sessions: push the branch, open the PR
+      --status          show each dispatched ticket, its session and its state
+
 EXECUTION
-  -j, --jobs N          max agents running at once (default $JOBS)
+  -j, --jobs N          max tickets launched at once (default $JOBS)
   -n, --dry-run         print the wave plan and exit; changes nothing
       --one-wave        dispatch only the currently-ready tickets, then stop
       --max-waves N     cap on dependency depth (default $MAX_WAVES)
@@ -106,6 +115,9 @@ log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 
 while (($#)); do
   case $1 in
+    --mode)         MODE=${2:?}; shift 2 ;;
+    --land)         ACTION=land; shift ;;
+    --status)       ACTION=status; shift ;;
     -r|--repo)      REPO_OPT=${2:?}; shift 2 ;;
     --dep-words)    DEP_WORDS=${2:?}; shift 2 ;;
     -l|--label)     LABELS+=("${2:?--label needs a value}"); shift 2 ;;
@@ -139,12 +151,16 @@ while (($#)); do
 done
 
 [[ $JOBS =~ ^[0-9]+$ && $JOBS -ge 1 ]] || die "--jobs must be a positive integer"
+[[ $MODE == session || $MODE == print ]] || die "--mode must be session or print"
 
 for tool in gh jq git; do
   command -v "$tool" >/dev/null || die "$tool is required but not on PATH"
 done
 if ((!DRY_RUN)) && [[ -z $AGENT_CMD ]]; then
   command -v claude >/dev/null || die "claude is required (or pass --agent-cmd)"
+fi
+if [[ $MODE == session && -n $AGENT_CMD ]]; then
+  die "--agent-cmd only applies to --mode print"
 fi
 
 git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
@@ -169,6 +185,9 @@ WORKTREE_ROOT=${WORKTREE_ROOT_OPT:-$MAIN_ROOT/.claude/worktrees/dispatch}
 RUN_ID=$(date +%Y%m%d-%H%M%S)
 RUN_DIR=$STATE_DIR/$RUN_ID
 mkdir -p "$RUN_DIR/logs" "$RUN_DIR/prompts" "$RUN_DIR/status"
+# Session records outlive a single run: --land and --status read them back.
+SESSION_DIR=$STATE_DIR/sessions
+mkdir -p "$SESSION_DIR"
 mkdir -p "$WORKTREE_ROOT"
 
 # Some mounted filesystems (the /c host mount in a sandbox, for one) break
@@ -299,10 +318,12 @@ skip_reason() {
 # ------------------------------------------------------------------ prompt --
 
 default_prompt_template() {
+  # The FIRST LINE becomes the session's name in `claude agents`, so it has to
+  # read as the ticket at a glance.
   cat <<'TPL'
-You are an autonomous engineer implementing GitHub issue #{{NUMBER}} in {{REPO}}.
+#{{NUMBER}} {{TITLE}}
 
-# Issue #{{NUMBER}}: {{TITLE}}
+You are an engineer implementing this GitHub issue in {{REPO}}.
 
 {{BODY}}
 
@@ -323,6 +344,9 @@ You are an autonomous engineer implementing GitHub issue #{{NUMBER}} in {{REPO}}
 - If the issue is under-specified or you hit a genuine blocker, stop and
   explain it in your final message instead of guessing. Issues that say
   "STOP and report" mean it.
+- A human may attach to this session while you work, to steer the work toward
+  a business goal the ticket does not spell out. Their instructions outrank
+  the ticket text; ask them when the ticket and the goal seem to disagree.
 
 Finish with a short summary: what you changed, what you ran, what you left out.
 TPL
@@ -366,19 +390,19 @@ base_for() {
   printf '%s\t%s\n' "${primary:-$BASE}" "${extras[*]:-}"
 }
 
-run_ticket() {
+# Everything a ticket needs before an agent touches it: a worktree on its own
+# branch, any blocker branches merged in, and the prompt written out.
+prepare_ticket() {
   local n=$1 base=$2 extras=$3
   local branch; branch=$(branch_of "$n")
   local wt=$WORKTREE_ROOT/issue-$n
   local logf=$RUN_DIR/logs/issue-$n.log
-  local promptf=$RUN_DIR/prompts/issue-$n.md
-  local rc=0 extra
+  local extra
 
-  set_status "$n" "running"
   {
     echo "=== issue #$n: ${I_TITLE[$n]}"
     echo "=== branch $branch  base $base  extras ${extras:-none}"
-    echo "=== started $(date -Is)"
+    echo "=== prepared $(date -Is)"
   } >>"$logf"
 
   if [[ -e $wt ]]; then
@@ -407,32 +431,83 @@ run_ticket() {
     sleep 1
   done
 
-  local start_sha; start_sha=$(git -C "$wt" rev-parse HEAD)
-  build_prompt "$n" "$branch" "$base" > "$promptf"
-
+  build_prompt "$n" "$branch" "$base" > "$RUN_DIR/prompts/issue-$n.md"
   if ((DO_ASSIGN)); then
     gh issue edit "$n" --repo "$REPO" --add-assignee @me >>"$logf" 2>&1 || true
   fi
+  return 0
+}
 
-  local -a cmd
-  if [[ -n $AGENT_CMD ]]; then
-    cmd=(bash -c "$AGENT_CMD")
-  else
-    cmd=(claude -p --permission-mode "$PERMISSION_MODE" --output-format text)
-    if [[ -n $MODEL ]]; then cmd+=(--model "$MODEL"); fi
+# --- session mode: an attachable background session per ticket ---------------
+
+# Records what a later --land or --status invocation needs to find the work.
+remember_session() {
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" > "$SESSION_DIR/$5"
+}
+
+session_field() { # $1 = ticket, $2 = field (1 id, 2 branch, 3 worktree, 4 base)
+  [[ -f $SESSION_DIR/$1 ]] || return 1
+  cut -f"$2" "$SESSION_DIR/$1"
+}
+
+# working | done | gone. A ticket whose session was removed reads as gone,
+# which lands the same way done does.
+session_state() {
+  local wt=$1 st
+  st=$(claude agents --json --all --cwd "$wt" 2>/dev/null \
+       | jq -r 'sort_by(.startedAt) | last | .state // "gone"' 2>/dev/null) || st=gone
+  printf '%s' "${st:-gone}"
+}
+
+launch_session() {
+  local n=$1 base=$2
+  local branch; branch=$(branch_of "$n")
+  local wt=$WORKTREE_ROOT/issue-$n
+  local logf=$RUN_DIR/logs/issue-$n.log
+  local promptf=$RUN_DIR/prompts/issue-$n.md
+
+  local -a cmd=(claude --bg --permission-mode "$PERMISSION_MODE")
+  if [[ -n $MODEL ]]; then cmd+=(--model "$MODEL"); fi
+
+  if ! ( cd -P "$wt" && "${cmd[@]}" "$(cat "$promptf")" ) >>"$logf" 2>&1; then
+    set_status "$n" "failed: could not start a background session (see $logf)"
+    return 1
   fi
-  if ((TIMEOUT > 0)) && command -v timeout >/dev/null; then
-    cmd=(timeout --signal=INT "$TIMEOUT" "${cmd[@]}")
+
+  # The short id is what `claude attach` takes. It reaches the registry a
+  # moment after launch, so give it a few seconds.
+  local id="" tries=0
+  while [[ -z $id ]] && ((tries < 20)); do
+    id=$(claude agents --json --all --cwd "$wt" 2>/dev/null \
+         | jq -r 'sort_by(.startedAt) | last | .id // empty' 2>/dev/null) || id=""
+    [[ -n $id ]] && break
+    tries=$((tries + 1))
+    sleep 1
+  done
+
+  remember_session "${id:-unknown}" "$branch" "$wt" "$base" "$n"
+  set_status "$n" "session ${id:-unknown} on $branch"
+  return 0
+}
+
+# --- landing: a finished session's work becomes a pushed branch and a PR -----
+
+land_ticket() {
+  local n=$1
+  local id branch wt base
+  id=$(session_field "$n" 1) || { set_status "$n" "not dispatched"; return 1; }
+  branch=$(session_field "$n" 2)
+  wt=$(session_field "$n" 3)
+  base=$(session_field "$n" 4)
+  local logf=$RUN_DIR/logs/issue-$n.log
+
+  local st; st=$(session_state "$wt")
+  if [[ $st == working || $st == busy ]]; then
+    set_status "$n" "still working — session $id is mid-turn, not landing it"
+    return 1
   fi
-
-  set +e
-  ( cd -P "$wt" && "${cmd[@]}" < "$promptf" ) >>"$logf" 2>&1
-  rc=$?
-  set -e
-  echo "=== agent exit $rc  $(date -Is)" >>"$logf"
-
-  if ((rc != 0)); then
-    set_status "$n" "failed: agent exited $rc (see $logf)"; return 1
+  if [[ ! -d $wt ]]; then
+    set_status "$n" "failed: worktree $wt is gone"; return 1
   fi
 
   # Safety net: the agent is asked to commit, but don't lose work if it didn't.
@@ -440,8 +515,8 @@ run_ticket() {
     git -C "$wt" add -A >>"$logf" 2>&1
     git -C "$wt" commit -m "Uncommitted agent work for #$n" >>"$logf" 2>&1 || true
   fi
-  if [[ $(git -C "$wt" rev-parse HEAD) == "$start_sha" ]]; then
-    set_status "$n" "no-changes: agent made no commits (see $logf)"; return 1
+  if [[ $(git -C "$wt" rev-list --count "$base..HEAD" 2>/dev/null || echo 0) == 0 ]]; then
+    set_status "$n" "no-changes: nothing committed on $branch yet"; return 1
   fi
 
   if ((DO_PUSH)); then
@@ -456,13 +531,15 @@ run_ticket() {
     # the trunk under the name GitHub knows it by.
     local pr_base=$base
     [[ $pr_base == "$BASE" ]] && pr_base=$BASE_BRANCH
-    pr_url=$(gh pr create --repo "$REPO" \
-      --head "$branch" --base "$pr_base" \
-      --title "${I_TITLE[$n]} (#$n)" \
-      --body "Closes #$n
+    pr_url=$(gh pr view "$branch" --repo "$REPO" --json url --jq .url 2>/dev/null) || pr_url=""
+    if [[ -z $pr_url ]]; then
+      pr_url=$(gh pr create --repo "$REPO" \
+        --head "$branch" --base "$pr_base" \
+        --title "${I_TITLE[$n]} (#$n)" \
+        --body "Closes #$n
 
-Implemented by a dispatched Claude Code agent.
-Agent log: \`.dispatch/$RUN_ID/logs/issue-$n.log\`" 2>>"$logf") || pr_url=""
+Implemented by a dispatched Claude Code agent, session \`$id\`." 2>>"$logf") || pr_url=""
+    fi
     if [[ -z $pr_url ]]; then
       set_status "$n" "partial: branch pushed, PR not created (see $logf)"; return 1
     fi
@@ -470,16 +547,51 @@ Agent log: \`.dispatch/$RUN_ID/logs/issue-$n.log\`" 2>>"$logf") || pr_url=""
 
   if ((DO_COMMENT)); then
     gh issue comment "$n" --repo "$REPO" \
-      --body "Dispatched agent finished on \`$branch\`${pr_url:+ — $pr_url}" \
+      --body "Dispatched agent finished on \`$branch\`${pr_url:+ - $pr_url}" \
       >>"$logf" 2>&1 || true
   fi
-
   if ((CLEANUP)); then
     git -C "$MAIN_ROOT" worktree remove --force "$wt" >>"$logf" 2>&1 || true
   fi
 
-  set_status "$n" "ok: $branch${pr_url:+ $pr_url}"
+  set_status "$n" "landed: $branch${pr_url:+ $pr_url}"
   return 0
+}
+
+# --- print mode: headless agent, runs to completion, lands immediately -------
+
+run_ticket_print() {
+  local n=$1 base=$2 extras=$3
+  local wt=$WORKTREE_ROOT/issue-$n
+  local logf=$RUN_DIR/logs/issue-$n.log
+  local branch; branch=$(branch_of "$n")
+  local rc=0
+
+  set_status "$n" "running"
+  prepare_ticket "$n" "$base" "$extras" || return 1
+  remember_session "print" "$branch" "$wt" "$base" "$n"
+
+  local -a cmd
+  if [[ -n $AGENT_CMD ]]; then
+    cmd=(bash -c "$AGENT_CMD")
+  else
+    cmd=(claude -p --permission-mode "$PERMISSION_MODE" --output-format text)
+    if [[ -n $MODEL ]]; then cmd+=(--model "$MODEL"); fi
+  fi
+  if ((TIMEOUT > 0)) && command -v timeout >/dev/null; then
+    cmd=(timeout --signal=INT "$TIMEOUT" "${cmd[@]}")
+  fi
+
+  set +e
+  ( cd -P "$wt" && "${cmd[@]}" < "$RUN_DIR/prompts/issue-$n.md" ) >>"$logf" 2>&1
+  rc=$?
+  set -e
+  echo "=== agent exit $rc  $(date -Is)" >>"$logf"
+  if ((rc != 0)); then
+    set_status "$n" "failed: agent exited $rc (see $logf)"; return 1
+  fi
+
+  land_ticket "$n"
 }
 
 # --------------------------------------------------------------- the plan ----
@@ -512,23 +624,38 @@ if ((${#RUNNABLE[@]})); then
   mapfile -t RUNNABLE < <(printf '%s\n' "${RUNNABLE[@]}" | sort -n)
 fi
 
-echo "repo:  $REPO"
-echo "base:  $BASE_BRANCH"
-echo "run:   $RUN_DIR"
-echo "jobs:  $JOBS   stack: $DO_STACK   dry-run: $DRY_RUN"
-echo
-
-if ((${#SKIPPED[@]})); then
-  echo "Skipped:"
-  for n in $(printf '%s\n' "${!SKIPPED[@]}" | sort -n); do
-    printf '  #%-4s %-55.55s  %s\n' "$n" "${I_TITLE[$n]}" "${SKIPPED[$n]}"
-  done
+# --status and --land report on work already dispatched; the planning header
+# and the skip list are noise there.
+if [[ $ACTION == dispatch ]]; then
+  echo "repo:  $REPO"
+  echo "base:  $BASE_BRANCH"
+  echo "run:   $RUN_DIR"
+  echo "mode:  $MODE   jobs: $JOBS   stack: $DO_STACK   dry-run: $DRY_RUN"
   echo
+
+  if ((${#SKIPPED[@]})); then
+    echo "Skipped:"
+    for n in $(printf '%s\n' "${!SKIPPED[@]}" | sort -n); do
+      printf '  #%-4s %-55.55s  %s\n' "$n" "${I_TITLE[$n]}" "${SKIPPED[$n]}"
+    done
+    echo
+  fi
+  ((${#RUNNABLE[@]})) || die "nothing to dispatch"
 fi
-((${#RUNNABLE[@]})) || die "nothing to dispatch"
 
 declare -A DISPATCHED=()   # issue -> 1 once its branch carries work
 declare -A SCHEDULED=()    # issue -> wave number (planning + execution)
+
+# A blocker is cleared once its branch carries work, not only once the issue
+# closes — otherwise nothing downstream could start until PRs were merged, and
+# a second invocation could never pick up where the first left off.
+branch_has_work() {
+  local br; br=$(branch_of "$1")
+  branch_exists "$br" || return 1
+  local ahead
+  ahead=$(git -C "$MAIN_ROOT" rev-list --count "$BASE..$br" 2>/dev/null || echo 0)
+  [[ $ahead != 0 ]]
+}
 
 ready_now() {
   local n b ready=() blocked
@@ -537,6 +664,7 @@ ready_now() {
     blocked=0
     for b in $(open_blockers "$n"); do
       [[ -n ${DISPATCHED[$b]:-} ]] && continue
+      branch_has_work "$b" && continue
       blocked=1; break
     done
     if ((!blocked)) && ((NATIVE_DEPS)) && [[ $(native_blocked "$n") != 0 ]]; then
@@ -579,16 +707,103 @@ fi
 
 # ------------------------------------------------------------- execution ----
 
+dispatched_tickets() { ls "$SESSION_DIR" 2>/dev/null | grep -E '^[0-9]+$' | sort -n; }
+
+if [[ $ACTION == status ]]; then
+  found=0
+  for n in $(dispatched_tickets); do
+    if ((${#EXPLICIT[@]})) && ! printf '%s\n' "${EXPLICIT[@]}" | grep -qx "$n"; then
+      continue
+    fi
+    found=1
+    id=$(session_field "$n" 1); branch=$(session_field "$n" 2)
+    wt=$(session_field "$n" 3); base=$(session_field "$n" 4)
+    st=$(session_state "$wt")
+    commits=$(git -C "$MAIN_ROOT" rev-list --count "$base..$branch" 2>/dev/null || echo '?')
+    printf '  #%-4s %-40.40s  %-8s  %-9s  %s commit(s)\n' \
+      "$n" "${I_TITLE[$n]:-}" "$id" "$st" "$commits"
+    printf '        attach: claude attach %s\n' "$id"
+  done
+  ((found)) || echo "Nothing dispatched yet."
+  exit 0
+fi
+
+if [[ $ACTION == land ]]; then
+  landed=0; held=0
+  for n in $(dispatched_tickets); do
+    if ((${#EXPLICIT[@]})) && ! printf '%s\n' "${EXPLICIT[@]}" | grep -qx "$n"; then
+      continue
+    fi
+    if land_ticket "$n"; then landed=$((landed + 1)); else held=$((held + 1)); fi
+    printf '  #%-4s %s\n' "$n" "$(get_status "$n")"
+  done
+  echo
+  echo "$landed landed, $held not landed."
+  ((held == 0))
+  exit $?
+fi
+
 PIDS=()
 cleanup_children() {
   local p
   for p in "${PIDS[@]:-}"; do [[ -n $p ]] && kill "$p" 2>/dev/null || true; done
 }
-trap 'log "interrupted — stopping agents"; cleanup_children; exit 130' INT TERM
-
 wait_for_slot() {
   while (( $(jobs -pr | wc -l) >= JOBS )); do sleep 2; done
 }
+
+# --- session mode: launch one attachable session per ready ticket, then stop --
+if [[ $MODE == session ]]; then
+  mapfile -t batch < <(ready_now)
+  [[ -n ${batch[0]:-} ]] || die "nothing is ready to dispatch"
+  if ((${#batch[@]} > JOBS)); then
+    log "${#batch[@]} tickets are ready; launching the first $JOBS (raise --jobs for more)"
+    batch=("${batch[@]:0:$JOBS}")
+  fi
+
+  launched=()
+  for n in "${batch[@]}"; do
+    SCHEDULED[$n]=1
+    IFS=$'\t' read -r tbase textras < <(base_for "$n")
+    log "preparing #$n (${I_TITLE[$n]}) from $tbase"
+    if ! prepare_ticket "$n" "$tbase" "$textras"; then
+      log "  #$n $(get_status "$n")"
+      continue
+    fi
+    if launch_session "$n" "$tbase"; then
+      launched+=("$n")
+    else
+      log "  #$n $(get_status "$n")"
+    fi
+  done
+
+  ((${#launched[@]})) || die "no sessions started"
+
+  echo
+  echo "Sessions you can attach to and steer:"
+  echo
+  printf '  %-5s %-40.40s %-9s %s\n' TICKET TITLE SESSION BRANCH
+  for n in "${launched[@]}"; do
+    printf '  #%-4s %-40.40s %-9s %s\n' \
+      "$n" "${I_TITLE[$n]}" "$(session_field "$n" 1)" "$(session_field "$n" 2)"
+  done
+  echo
+  echo "  claude agents                 list them"
+  for n in "${launched[@]}"; do
+    printf '  claude attach %-9s     steer #%s\n' "$(session_field "$n" 1)" "$n"
+  done
+  echo
+  echo "When a session is done, land its work:"
+  echo "  $0 --land                     push branches and open PRs"
+  echo "  $0 --status                   see what each session is doing"
+  echo
+  echo "Then run this again for the next wave — tickets whose blockers now have"
+  echo "work are picked up automatically."
+  exit 0
+fi
+
+# --- print mode: headless agents, waves chained in one invocation ------------
+trap 'log "interrupted - stopping agents"; cleanup_children; exit 130' INT TERM
 
 wave=0
 while :; do
@@ -599,14 +814,14 @@ while :; do
   mapfile -t batch < <(ready_now)
   [[ -n ${batch[0]:-} ]] || break
 
-  log "wave $wave: dispatching ${#batch[@]} ticket(s) — ${batch[*]}"
+  log "wave $wave: dispatching ${#batch[@]} ticket(s) - ${batch[*]}"
   PIDS=()
   for n in "${batch[@]}"; do
     SCHEDULED[$n]=$wave
     IFS=$'\t' read -r tbase textras < <(base_for "$n")
     wait_for_slot
     log "  #$n ${I_TITLE[$n]} (from $tbase)"
-    run_ticket "$n" "$tbase" "$textras" &
+    run_ticket_print "$n" "$tbase" "$textras" &
     PIDS+=($!)
   done
   wait || true
@@ -614,8 +829,8 @@ while :; do
   for n in "${batch[@]}"; do
     st=$(get_status "$n")
     case $st in
-      ok:*) DISPATCHED[$n]=1; log "  #$n OK — ${st#ok: }" ;;
-      *)    log "  #$n $st" ;;
+      landed:*) DISPATCHED[$n]=1; log "  #$n OK - ${st#landed: }" ;;
+      *)        log "  #$n $st" ;;
     esac
   done
 
@@ -636,7 +851,7 @@ for n in "${RUNNABLE[@]}"; do
   fi
   st=$(get_status "$n")
   printf '  #%-4s %-45.45s  %s\n' "$n" "${I_TITLE[$n]}" "$st"
-  case $st in ok:*) ok=$((ok + 1)) ;; *) bad=$((bad + 1)) ;; esac
+  case $st in landed:*) ok=$((ok + 1)) ;; *) bad=$((bad + 1)) ;; esac
 done
 echo
 echo "$ok succeeded, $bad failed, $pending not reached. Logs: $RUN_DIR/logs/"
