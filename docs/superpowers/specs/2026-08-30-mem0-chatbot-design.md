@@ -63,7 +63,8 @@ Two runtime groups.
 
 **Infra services** — Docker Compose, stateful and disposable:
 
-- `app-postgres` — LangGraph checkpoints (thread state) plus `users` and `sessions` tables.
+- `app-postgres` — LangGraph checkpoints (thread state) plus the `users`, `auth_sessions`,
+  and `conversations` tables.
 
 mem0 and LangSmith are both managed services, so neither adds local infrastructure. The
 only container is Postgres.
@@ -82,7 +83,10 @@ display purposes only.
 ### Backend
 
 - `auth/` — `/auth/login` (redirect to Google), `/auth/callback` (exchange code, verify
-  id token, upsert user, set session cookie), `/auth/me` (session check for the frontend).
+  id token, upsert user, set session cookie), `/auth/me` (session check for the frontend),
+  `/auth/logout` (revoke the auth session).
+- `conversations/` — the conversation registry and its ownership check
+  (see [Conversation management](#conversation-management)).
 - `agent/` — the LangGraph graph, three nodes in fixed order:
   - `retrieve_memories` — searches mem0 scoped to `user_id`, folds results into the system
     prompt for this turn only. Skipped entirely when `memory_enabled` is false (see
@@ -105,9 +109,16 @@ added later without disturbing this structure.
 ### Frontend
 
 - Unauthenticated: a single "Sign in with Google" screen that redirects to the backend.
-- Authenticated: CopilotKit provider plus `<CopilotChat/>` pointed at `/agent`.
+- Authenticated: a conversation sidebar (list, new, rename, delete) alongside a CopilotKit
+  provider plus `<CopilotChat/>` pointed at `/agent`, keyed by the selected `threadId`.
 
-The UI is deliberately minimal — no in-app memory inspector and no per-message trace links.
+The sidebar is the application's own component. CopilotKit's built-in threads drawer
+requires CopilotKit Intelligence, which this project does not use — see
+[Open question](#open-question--resuming-conversation-history-in-the-ui), which currently
+blocks history rehydration on conversation switch.
+
+The UI is otherwise deliberately minimal — no in-app memory inspector and no per-message
+trace links.
 Memory writes are inspected in the mem0 dashboard and traces in the LangSmith UI. Visual
 design of the chat surface is being specified separately in a designer brief.
 
@@ -124,6 +135,99 @@ GOOGLE_CLIENT_SECRET
 DATABASE_URL
 MEMORY_RETRIEVAL_ENABLED=true   # default for the memory toggle
 ```
+
+## Conversation management
+
+A user has many conversations and can browse, resume, rename, and delete them. This section
+covers how that list is owned and secured.
+
+### Why a conversations table is required
+
+**LangGraph's `PostgresSaver` has no concept of users.** It stores checkpoints keyed by
+`thread_id` and will return any thread's full history to any caller that names it. Since
+`thread_id` is visible to the browser, an endpoint that trusts a client-supplied
+`thread_id` without an ownership check lets one user:
+
+- read another user's entire conversation, and
+- append turns to it, which then writes memories derived from that exchange into the wrong
+  user's mem0 space.
+
+This is a genuine authorisation vulnerability, not a theoretical one, and it is the primary
+reason for the table below. The conversation list is the secondary benefit.
+
+### Division of responsibility
+
+**The application owns conversation identity and ownership; LangGraph owns message
+content.** The `conversations` table is the index and access-control layer; the checkpointer
+holds the messages behind each row. The application must never query LangGraph's checkpoint
+tables directly to build the list — that schema is LangGraph's internal detail and not a
+stable interface.
+
+```
+conversations
+  id           uuid primary key   -- this IS the thread_id passed to LangGraph
+  user_id      text not null      -- FK to users, the Google `sub`
+  title        text
+  created_at   timestamptz
+  updated_at   timestamptz        -- newest-first ordering
+  archived_at  timestamptz null   -- soft delete
+```
+
+### Endpoints
+
+All are scoped to the authenticated user, without exception.
+
+| Route | Purpose |
+|---|---|
+| `GET /conversations` | List for the current user, newest first |
+| `POST /conversations` | Create; returns the new id |
+| `GET /conversations/{id}` | Load messages to resume, after the ownership check |
+| `PATCH /conversations/{id}` | Rename |
+| `DELETE /conversations/{id}` | Delete the row **and** the associated checkpoint rows |
+
+**The ownership check lives in exactly one place** — a shared dependency resolving
+(`thread_id`, auth session) to a conversation or a 404, used by `/agent` and by every
+`/conversations/{id}` route. Implemented per-route, one route will eventually omit it. It
+returns **404 rather than 403**, so the response does not confirm that another user's
+conversation exists.
+
+**Titles** are the first user message truncated to ~50 characters, set on the first turn.
+LLM-generated titles read better but cost an extra model call per conversation, which is not
+worth it here; renaming covers the shortfall.
+
+**Deletion** must remove the checkpoint rows as well as the registry row. Otherwise orphaned
+checkpoint state retains the message content the user asked to have deleted.
+
+### Interaction with mem0 — important
+
+Memories are scoped to **`user_id`, not `thread_id`**. This is deliberate and is the
+mechanism behind the core demo: memories cross conversation boundaries, so a brand-new
+conversation still knows the user is vegetarian.
+
+The consequence must be stated plainly: **deleting a conversation does not delete the
+memories derived from it.** The transcript disappears; mem0 retains what it extracted. A
+user who expects "delete" to mean "forgotten" will be surprised. This is precisely why the
+[forget capability](#planned-second-iteration) is a distinct feature rather than something
+conversation deletion provides for free.
+
+### Auth sessions
+
+Distinct from conversations despite the overlapping word. The table is named
+**`auth_sessions`** rather than `sessions` specifically to prevent that confusion.
+
+```
+auth_sessions
+  id           uuid primary key
+  user_id      text not null
+  created_at   timestamptz
+  expires_at   timestamptz
+  revoked_at   timestamptz null
+```
+
+Server-side sessions rather than stateless JWTs: Postgres is already present, and DB-backed
+sessions support revocation and "log out everywhere," which JWTs cannot do without
+additional machinery. The cookie is `httpOnly`, `secure`, `sameSite=lax`, with absolute
+expiry.
 
 ## Memory semantics
 
@@ -171,9 +275,11 @@ does not create a gap in the user's memory history.
 ## Data flow — one chat turn
 
 1. **Frontend** sends the user's message to `/agent` over SSE, carrying the current
-   `thread_id` (or none, for a new conversation) and the session cookie.
+   `thread_id` (obtained from `POST /conversations` for a new conversation) and the session
+   cookie.
 2. **Backend** resolves the authenticated user from the session cookie, yielding the mem0
-   `user_id` and the conversation `thread_id`.
+   `user_id`, then runs the shared ownership check to confirm this user owns `thread_id`,
+   returning 404 if not. No graph invocation happens before that check passes.
 3. **Graph invocation**:
 
    ```python
@@ -202,9 +308,10 @@ does not create a gap in the user's memory history.
    `MESSAGES_SNAPSHOT` with the assistant reply → `RUN_FINISHED`. CopilotKit renders these
    incrementally.
 8. **Automatic side effects** — `PostgresSaver` persists updated conversation state under
-   `thread_id`, so a reload resumes the same conversation. LangSmith captures the whole
-   invocation as one trace tagged by `thread_id` and `user_id`, with no code beyond the
-   metadata in step 3.
+   `thread_id`, so a reload resumes the same conversation. The conversation's `updated_at`
+   is bumped so it sorts to the top of the list, and its title is set from this message if
+   it was the first turn. LangSmith captures the whole invocation as one trace tagged by
+   `thread_id` and `user_id`, with no code beyond the metadata in step 3.
 
 ## Auth flow
 
@@ -245,6 +352,11 @@ Scoped to what protects the integration, not blanket coverage.
   conversation on one `thread_id` resumes correctly from the checkpointer.
 - **Auth** — the callback handler with a stubbed Google token response: user upsert, cookie
   issuance, and the 401 path on `/agent`.
+- **Authorization (required, not optional)** — user B requests user A's `thread_id` against
+  `/agent` and against every `/conversations/{id}` route, and receives 404 in each case.
+  This is the regression test for the vulnerability described in
+  [Why a conversations table is required](#why-a-conversations-table-is-required); without
+  it, a future refactor can silently reintroduce cross-user access.
 - **Manual end-to-end** — the real acceptance test:
   1. Log in as user A, state a preference ("I'm vegetarian").
   2. Start a **new** conversation; ask something that should use it; confirm recall.
@@ -285,7 +397,8 @@ use_mem0/
       main.py                 # FastAPI app, mounts auth + agui routers
       config.py               # env loading/validation, fail-fast on missing keys
       auth/                   # routes.py, google.py, session.py
-      db/                     # engine, users/sessions schema, migrations
+      conversations/          # routes.py, ownership.py (the shared 404 check)
+      db/                     # engine, schema (users/auth_sessions/conversations), migrations
       agent/
         graph.py              # graph definition + compile w/ PostgresSaver
         nodes.py              # retrieve_memories, call_model, write_memories
@@ -297,7 +410,8 @@ use_mem0/
     src/
       App.tsx                 # auth gate: login screen vs. chat
       Login.tsx
-      Chat.tsx                # CopilotKit provider + <CopilotChat/>
+      ConversationList.tsx    # sidebar: list, new, rename, delete
+      Chat.tsx                # CopilotKit provider + <CopilotChat/>, keyed by threadId
 ```
 
 Two independent processes, one Compose file, secrets only in `.env`.
@@ -326,6 +440,56 @@ research step before planning.
   LangSmith dashboards.
 - Agent tools beyond memory — the graph has no tool-calling layer in this iteration.
 - `use_graphiti/` — a separate experiment, untouched by this spec.
+
+## Open question — resuming conversation history in the UI
+
+**Status: unresolved. Blocks the frontend portion of the implementation plan; the backend
+design above is unaffected.**
+
+Research against CopilotKit 1.69.3 and `ag-ui-langgraph` 0.0.44 found that **loading a past
+conversation's messages back into the chat UI has no working path on this stack**:
+
+- `threadId` itself works. It is a top-level field of AG-UI's `RunAgentInput`, and
+  `ag-ui-langgraph` maps it unconditionally onto `config["configurable"]["thread_id"]`
+  (`agent.py:1638`), so LangGraph checkpointing keys off it correctly. Resumption works
+  *server-side* — the agent has full history.
+- **The UI cannot display that history on load.** CopilotKit's v1 `loadAgentState`
+  resolver is stubbed out in 1.69.3 (`state.resolver.mjs` returns `{}` / throws), and
+  react-core no longer issues the query. Open, unresolved:
+  [#2200](https://github.com/CopilotKit/CopilotKit/issues/2200),
+  [#2624](https://github.com/CopilotKit/CopilotKit/issues/2624). No `initialMessages` prop
+  was found.
+- `add_langgraph_fastapi_endpoint` exposes only `POST {path}` and `GET {path}/health` —
+  **no history-fetch endpoint**. `MESSAGES_SNAPSHOT` is emitted only mid-run, so history
+  arrives only after a new message is sent.
+- CopilotKit's built-in `CopilotThreadsDrawer` / `useThreads` **require CopilotKit
+  Intelligence** (licensed); without it the drawer renders a locked view and thread
+  management is entirely the application's responsibility.
+
+No official example exists of multi-conversation history against a self-hosted
+`ag-ui-langgraph` backend without Intelligence.
+
+Net effect if built as currently specified: a user clicking a past conversation would see an
+**empty chat pane**, then have their history appear only after sending a new message. That
+fails the conversation-list requirement.
+
+### Options
+
+1. **Custom history load into CopilotKit** — add `GET /conversations/{id}/messages` reading
+   from the checkpointer, and hydrate the UI with it. Blocked on whether CopilotKit exposes
+   any supported seam for injecting prior messages; no such prop was verified to exist, so
+   this needs a spike before it can be planned.
+2. **Hand-build the chat on `@ag-ui/client`** — full control over rendering history, at the
+   cost of writing the message list, input, and streaming indicators ourselves. Reverses the
+   earlier CopilotKit decision, which was made before this limitation was known.
+3. **CopilotKit Intelligence** — the supported path, but introduces a licensed dependency
+   and routes conversation data through their platform.
+4. **Accept the limitation** — single active conversation per session, no resumable list.
+   Contradicts the conversation-management requirement above.
+
+**Recommendation: spike option 1 first** (timeboxed), since it preserves the current design;
+fall back to option 2 if no injection seam exists. Option 2 is the safe default and only
+costs frontend work, which this project has little of.
 
 ## Known risks
 
