@@ -128,6 +128,14 @@ than assistant-ui's `@experimental` thread-list adapter — see
 assistant-ui's primitives are headless, so the visual design is fully the application's
 own; the mockup is implemented directly rather than approximated through theme props.
 
+**Design system: Tailwind CSS + shadcn/ui.** This is assistant-ui's own supported path — its
+CLI copies styled component source into the repository, where it is edited directly rather
+than configured through a vendor theme. The mockup's palette is applied by overriding
+shadcn's CSS variable *values* while keeping its variable *names*, so every generated
+component inherits the design automatically. Primitives that carry focus management and ARIA
+behaviour (dialog, dropdown, scroll area) come from shadcn rather than being hand-rolled —
+which matters most for the delete confirmation, the guard on an irreversible action.
+
 The UI is otherwise deliberately minimal — no in-app memory inspector and no per-message
 trace links.
 Memory writes are inspected in the mem0 dashboard and traces in the LangSmith UI. Visual

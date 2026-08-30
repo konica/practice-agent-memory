@@ -14,7 +14,8 @@ history adapter that calls our own backend.
 
 **Tech Stack:** Python 3.11+, FastAPI, LangGraph, `langgraph-checkpoint-postgres`, `mem0ai`,
 `langsmith`, OpenAI, Postgres 16 (Docker), React 18, Vite, TypeScript,
-`@assistant-ui/react`, `@assistant-ui/react-ag-ui`, `ag-ui-protocol`, `ag-ui-langgraph`.
+`@assistant-ui/react`, `@assistant-ui/react-ag-ui`, `ag-ui-protocol`, `ag-ui-langgraph`,
+**Tailwind CSS + shadcn/ui**.
 
 **Spec:** `docs/superpowers/specs/2026-08-30-mem0-chatbot-design.md`
 
@@ -43,6 +44,13 @@ Every task's requirements implicitly include this section.
 - **Design tokens from the mockup** (use verbatim): background `#FAF9F6`, surface `#F4F1EA`,
   text `#21201C`, muted text `#6B675F`, border `#E7E4DD`, accent `#2E6F7E`. Message bubble
   radius `14px`, message column `max-width: 640px`, sidebar width `260px`.
+- **Styling is Tailwind utility classes over shadcn/ui components.** The mockup's palette is
+  applied by overriding shadcn's CSS variable *values* while keeping its variable *names*, so
+  every generated component inherits the design automatically. Never inline `style` objects,
+  and never hand-roll a primitive (dialog, dropdown, scroll area) that shadcn already
+  provides — those bring focus management and ARIA behaviour with them.
+- **shadcn component source in `src/components/ui/` is ours to edit.** It is copied in, not a
+  vendored dependency; editing it directly is the intended workflow.
 - **Delete is always an explicit confirmation step.** Never a one-click destructive action,
   and never offer an undo affordance — the confirmation copy promises permanence.
 
@@ -83,14 +91,24 @@ use_mem0/
   frontend/
     package.json
     vite.config.ts
+    components.json             # shadcn config
     src/
       main.tsx
       App.tsx                   # auth gate
       api.ts                    # typed fetch helpers
-      theme.css                 # design tokens from the mockup
+      index.css                 # tailwind base + mockup tokens over shadcn variables
+      components/ui/            # shadcn source, copied in and ours to edit
       Login.tsx
-      ConversationList.tsx      # sidebar: list, new, inline rename, delete modal
-      Chat.tsx                  # AssistantRuntimeProvider + <Thread/>
+      Workspace.tsx             # sidebar + chat layout
+      ConversationList.tsx      # list, new, inline rename, delete dialog
+      DeleteDialog.tsx
+      Chat.tsx                  # AssistantRuntimeProvider + composed thread
+      chat/                     # styled assistant-ui primitives (Task 14)
+        ThreadView.tsx
+        UserMessage.tsx
+        AssistantMessage.tsx
+        Composer.tsx
+        LoadingSkeleton.tsx
       historyAdapter.ts         # adapters.history -> GET /conversations/{id}/messages
 ```
 
@@ -2221,14 +2239,16 @@ git commit -m "feat: add conversation history endpoint for ui rehydration"
 
 ---
 
-## Task 11: Frontend scaffold, theme tokens, and auth gate
+## Task 11: Frontend scaffold, design system, and auth gate
 
 **Files:**
 - Create: `use_mem0/frontend/package.json`
 - Create: `use_mem0/frontend/vite.config.ts`
 - Create: `use_mem0/frontend/index.html`
+- Create: `use_mem0/frontend/components.json` (written by `shadcn init`)
 - Create: `use_mem0/frontend/src/main.tsx`
-- Create: `use_mem0/frontend/src/theme.css`
+- Create: `use_mem0/frontend/src/index.css` (Tailwind base + mockup tokens)
+- Create: `use_mem0/frontend/src/components/ui/*` (copied in by `shadcn add`)
 - Create: `use_mem0/frontend/src/api.ts`
 - Create: `use_mem0/frontend/src/App.tsx`
 - Create: `use_mem0/frontend/src/Login.tsx`
@@ -2249,36 +2269,79 @@ cd use_mem0 && npm create vite@latest frontend -- --template react-ts && cd fron
 npm install @assistant-ui/react@0.15.17 @assistant-ui/react-ag-ui@0.0.57 @ag-ui/client@0.0.58
 ```
 
-- [ ] **Step 2: Write the theme tokens**
+- [ ] **Step 2: Initialise Tailwind and shadcn/ui**
+
+Run shadcn's official initialiser rather than hand-writing a Tailwind config — it configures
+Tailwind for whichever version is current and writes the correct `components.json`,
+path aliases, and base CSS:
+
+```bash
+cd use_mem0/frontend && npx shadcn@latest init
+```
+
+Accept the defaults except: choose the **Neutral** base colour (our palette is warm-neutral
+and overriding a neutral base is cleaner than fighting a tinted one).
+
+Then install the primitives this project uses:
+
+```bash
+npx shadcn@latest add button input dialog dropdown-menu scroll-area avatar
+```
+
+shadcn copies component **source** into `src/components/ui/`. These files are ours to edit
+directly — they are not a vendored dependency, and editing them is the intended workflow.
+
+- [ ] **Step 3: Apply the mockup's design tokens**
+
+Replace the colour variables shadcn generated in `src/index.css` with the approved mockup
+values. Keep shadcn's variable *names* — its components reference them — and change only the
+values, so every generated component inherits our palette automatically:
 
 ```css
-/* use_mem0/frontend/src/theme.css — values taken from the approved mockup */
+/* use_mem0/frontend/src/index.css — palette from the approved mockup */
 :root {
-  --bg: #FAF9F6;
-  --surface: #F4F1EA;
-  --surface-alt: #EFEBE3;
-  --text: #21201C;
-  --text-muted: #6B675F;
+  --background: #FAF9F6;
+  --foreground: #21201C;
+  --card: #FAF9F6;
+  --card-foreground: #21201C;
+  --popover: #FAF9F6;
+  --popover-foreground: #21201C;
+  --primary: #2E6F7E;
+  --primary-foreground: #FFFFFF;
+  --secondary: #F4F1EA;
+  --secondary-foreground: #21201C;
+  --muted: #F4F1EA;
+  --muted-foreground: #6B675F;
+  --accent: #EFEBE3;
+  --accent-foreground: #21201C;
+  --destructive: #B3402B;
+  --destructive-foreground: #FFFFFF;
   --border: #E7E4DD;
-  --accent: #2E6F7E;
-  --accent-soft: #EAF2F1;
-  --radius-bubble: 14px;
-  --radius-control: 10px;
-  --sidebar-width: 260px;
-  --message-max-width: 640px;
+  --input: #E7E4DD;
+  --ring: #2E6F7E;
+  --radius: 0.625rem; /* 10px controls */
 }
 
-* { box-sizing: border-box; }
-
 body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: 14.5px;
   line-height: 1.55;
 }
 ```
+
+Add the project-specific dimensions that are not part of shadcn's token set. Define them
+alongside the above:
+
+```css
+:root {
+  --sidebar-width: 260px;
+  --message-max-width: 640px;
+  --radius-bubble: 14px;
+}
+```
+
+**All components in this and later tasks use Tailwind utility classes**, referencing these
+tokens (`bg-background`, `text-muted-foreground`, `border-border`, and so on) rather than
+inline `style` objects.
 
 - [ ] **Step 3: Write the API client**
 
@@ -2345,29 +2408,20 @@ export const loginUrl = `${BASE}/auth/login`;
 
 ```tsx
 // use_mem0/frontend/src/Login.tsx
+import { Button } from "@/components/ui/button";
 import { loginUrl } from "./api";
 
 export function Login() {
   return (
-    <div style={{ display: "grid", placeItems: "center", minHeight: "100vh" }}>
-      <div style={{ textAlign: "center", maxWidth: 360 }}>
-        <h1 style={{ fontSize: 22, marginBottom: 8 }}>Assistant Agent</h1>
-        <p style={{ color: "var(--text-muted)", marginTop: 0, marginBottom: 28 }}>
+    <div className="grid min-h-screen place-items-center bg-background">
+      <div className="max-w-sm text-center">
+        <h1 className="mb-2 text-[22px] font-medium text-foreground">Assistant Agent</h1>
+        <p className="mb-7 text-muted-foreground">
           A personal assistant that remembers what matters across your conversations.
         </p>
-        <a
-          href={loginUrl}
-          style={{
-            display: "inline-block",
-            padding: "10px 18px",
-            borderRadius: "var(--radius-control)",
-            background: "var(--accent)",
-            color: "#fff",
-            textDecoration: "none",
-          }}
-        >
-          Sign in with Google
-        </a>
+        <Button asChild>
+          <a href={loginUrl}>Sign in with Google</a>
+        </Button>
       </div>
     </div>
   );
@@ -2404,7 +2458,7 @@ export default function App() {
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
-import "./theme.css";
+import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
@@ -2588,8 +2642,9 @@ git commit -m "feat: wire assistant-ui to ag-ui endpoint with history rehydratio
 - Conversation titles truncate with a single-line CSS ellipsis; do not truncate in JS. The
   backend's 50-character title cap and the display truncation are independent.
 - The active conversation is marked by a **background fill**, not a left border accent.
-- A `⋮` affordance appears on hover, opening a menu with Rename and Delete. Clicking
-  outside closes it.
+- A `⋮` affordance appears on hover, opening a menu with Rename and Delete. Dismissal on
+  outside-click comes free from shadcn's `DropdownMenu` — do not hand-roll a document
+  click listener.
 - **Rename is inline**: the title becomes an editable field in place. Enter or blur commits;
   Escape cancels.
 - **Delete opens a confirmation dialog** with this exact copy: "This removes the conversation
@@ -2606,6 +2661,16 @@ git commit -m "feat: wire assistant-ui to ag-ui endpoint with history rehydratio
 
 ```tsx
 // use_mem0/frontend/src/DeleteDialog.tsx
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+
 export function DeleteDialog({
   open,
   title,
@@ -2617,51 +2682,49 @@ export function DeleteDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  if (!open) return null;
   return (
-    <div
-      onClick={onCancel}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "#0006",
-        display: "grid",
-        placeItems: "center",
-      }}
-    >
-      <div
-        onClick={(event) => event.stopPropagation()}
-        style={{
-          background: "var(--bg)",
-          borderRadius: "var(--radius-control)",
-          padding: 24,
-          maxWidth: 420,
-          border: "1px solid var(--border)",
-        }}
-      >
-        <h2 style={{ fontSize: 16, margin: "0 0 10px" }}>Delete “{title}”?</h2>
-        <p style={{ color: "var(--text-muted)", fontSize: 13.5, margin: "0 0 20px" }}>
-          This removes the conversation and its messages. Anything Assistant Agent has
-          already learned from it stays remembered — deleting a conversation doesn’t erase
-          that memory.
-        </p>
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button onClick={onCancel}>Cancel</button>
-          <button onClick={onConfirm} style={{ background: "#B3402B", color: "#fff" }}>
+    <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
+      <DialogContent className="max-w-[420px]">
+        <DialogHeader>
+          <DialogTitle className="text-base">Delete “{title}”?</DialogTitle>
+          <DialogDescription className="text-[13.5px]">
+            This removes the conversation and its messages. Anything Assistant Agent has
+            already learned from it stays remembered — deleting a conversation doesn’t
+            erase that memory.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={onConfirm}>
             Delete
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 ```
+
+Using shadcn's `Dialog` rather than a hand-rolled overlay gives focus trapping, Escape
+handling, and correct ARIA roles without extra work — which matters here because this dialog
+is the guard on an irreversible action.
 
 - [ ] **Step 2: Write the sidebar**
 
 ```tsx
 // use_mem0/frontend/src/ConversationList.tsx
 import { useEffect, useRef, useState } from "react";
+import { MoreVertical } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Conversation, deleteConversation, renameConversation } from "./api";
 import { DeleteDialog } from "./DeleteDialog";
 
@@ -2676,17 +2739,10 @@ export function ConversationList({
   onSelect: (id: string) => void;
   onChanged: () => void;
 }) {
-  const [menuFor, setMenuFor] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [pendingDelete, setPendingDelete] = useState<Conversation | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    const close = () => setMenuFor(null);
-    document.addEventListener("click", close);
-    return () => document.removeEventListener("click", close);
-  }, []);
 
   useEffect(() => {
     if (renamingId) inputRef.current?.focus();
@@ -2703,7 +2759,7 @@ export function ConversationList({
 
   return (
     <>
-      <nav style={{ display: "flex", flexDirection: "column", gap: 2, overflowY: "auto" }}>
+      <nav className="flex flex-col gap-0.5">
         {conversations.map((conversation) => {
           const isActive = conversation.id === activeId;
           const label = conversation.title ?? "New chat";
@@ -2711,18 +2767,12 @@ export function ConversationList({
             <div
               key={conversation.id}
               onClick={() => onSelect(conversation.id)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "7px 10px",
-                borderRadius: 7,
-                cursor: "pointer",
-                background: isActive ? "var(--surface-alt)" : "transparent",
-              }}
+              className={`group flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.5 ${
+                isActive ? "bg-accent" : "hover:bg-accent/50"
+              }`}
             >
               {renamingId === conversation.id ? (
-                <input
+                <Input
                   ref={inputRef}
                   value={draft}
                   onChange={(event) => setDraft(event.target.value)}
@@ -2731,53 +2781,42 @@ export function ConversationList({
                     if (event.key === "Enter") commitRename(conversation.id);
                     if (event.key === "Escape") setRenamingId(null);
                   }}
-                  style={{ flex: 1, font: "inherit" }}
+                  onClick={(event) => event.stopPropagation()}
+                  className="h-7 flex-1 text-[13.5px]"
                 />
               ) : (
-                <span
-                  style={{
-                    flex: 1,
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    fontSize: 13.5,
-                  }}
-                >
-                  {label}
-                </span>
+                <span className="flex-1 truncate text-[13.5px]">{label}</span>
               )}
-              <button
-                aria-label="Conversation actions"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setMenuFor(menuFor === conversation.id ? null : conversation.id);
-                }}
-              >
-                ⋮
-              </button>
-              {menuFor === conversation.id && (
-                <div style={{ position: "absolute", background: "var(--bg)" }}>
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation();
+
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Conversation actions"
+                    onClick={(event) => event.stopPropagation()}
+                    className="h-6 w-6 opacity-0 group-hover:opacity-100 data-[state=open]:opacity-100"
+                  >
+                    <MoreVertical className="h-3.5 w-3.5" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem
+                    onSelect={() => {
                       setDraft(label);
                       setRenamingId(conversation.id);
-                      setMenuFor(null);
                     }}
                   >
                     Rename
-                  </button>
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setPendingDelete(conversation);
-                      setMenuFor(null);
-                    }}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    variant="destructive"
+                    onSelect={() => setPendingDelete(conversation)}
                   >
                     Delete
-                  </button>
-                </div>
-              )}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           );
         })}
@@ -2837,68 +2876,51 @@ export function Workspace({ user }: { user: User }) {
   };
 
   return (
-    <div style={{ display: "flex", height: "100vh" }}>
-      <aside
-        style={{
-          width: "var(--sidebar-width)",
-          borderRight: "1px solid var(--border)",
-          background: "var(--surface)",
-          display: "flex",
-          flexDirection: "column",
-          padding: 10,
-        }}
-      >
-        <button onClick={startNewChat} style={{ marginBottom: 10 }}>
-          + New chat
-        </button>
+    <div className="flex h-screen bg-background">
+      <aside className="flex w-[var(--sidebar-width)] flex-col border-r border-border bg-secondary p-2.5">
+        <Button variant="ghost" onClick={startNewChat} className="mb-2.5 justify-start gap-2">
+          <Plus className="h-4 w-4" />
+          New chat
+        </Button>
 
-        <div style={{ flex: 1, overflowY: "auto" }}>
+        <ScrollArea className="flex-1">
           <ConversationList
             conversations={conversations}
             activeId={activeId}
             onSelect={setActiveId}
             onChanged={refresh}
           />
-        </div>
+        </ScrollArea>
 
-        <div
-          style={{
-            borderTop: "1px solid var(--border)",
-            paddingTop: 10,
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-          }}
-        >
-          <span
-            style={{
-              flex: 1,
-              fontSize: 12.5,
-              color: "var(--text-muted)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
+        <div className="flex items-center gap-2 border-t border-border pt-2.5">
+          <Avatar className="h-6 w-6">
+            {user.picture && <AvatarImage src={user.picture} alt="" />}
+            <AvatarFallback className="text-[10px]">
+              {(user.name ?? user.email).slice(0, 1).toUpperCase()}
+            </AvatarFallback>
+          </Avatar>
+          <span className="flex-1 truncate text-[12.5px] text-muted-foreground">
             {user.name ?? user.email}
           </span>
-          <button
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={async () => {
               await logout();
               window.location.reload();
             }}
           >
             Sign out
-          </button>
+          </Button>
         </div>
       </aside>
 
-      <main style={{ flex: 1, display: "grid", placeItems: "stretch" }}>
+      <main className="flex-1">
         {activeId ? (
           <Chat key={activeId} threadId={activeId} />
         ) : (
-          <div style={{ display: "grid", placeItems: "center", padding: 40 }}>
-            <p style={{ color: "var(--text-muted)", maxWidth: 420, textAlign: "center" }}>
+          <div className="grid h-full place-items-center p-10">
+            <p className="max-w-md text-center text-muted-foreground">
               You don’t have any conversations yet. Start one below, and I’ll remember what
               matters as we go — in this conversation and any you start later.
             </p>
@@ -2908,6 +2930,15 @@ export function Workspace({ user }: { user: User }) {
     </div>
   );
 }
+```
+
+Add to the imports at the top of this file:
+
+```tsx
+import { Plus } from "lucide-react";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
 ```
 
 Note the `key={activeId}` on `<Chat>`: it forces a fresh runtime per conversation, so the
@@ -2934,7 +2965,72 @@ git commit -m "feat: add conversation sidebar with inline rename and delete conf
 
 ---
 
-## Task 14: End-to-end acceptance
+## Task 14: Chat surface styling
+
+**Files:**
+- Modify: `use_mem0/frontend/src/Chat.tsx`
+- Create: `use_mem0/frontend/src/chat/` — composed assistant-ui primitives
+
+**Interfaces:**
+- Consumes: assistant-ui primitives, the shadcn tokens from Task 11.
+- Produces: a styled `<Chat threadId />` matching the mockup's chat artboard.
+
+**Why this is its own task:** assistant-ui is headless — it ships behaviour with no
+appearance. Task 12 renders the default `<Thread />` to prove the integration works; this
+task makes it look like the approved design. Those are separate concerns and separate
+review gates.
+
+**Design requirements from the approved mockup:**
+- Message column `max-width: 640px`, centred.
+- Message bubbles use `--radius-bubble` (14px). User and assistant bubbles are visually
+  distinct — user on `bg-primary`/`text-primary-foreground`, assistant on
+  `bg-secondary`/`text-secondary-foreground`.
+- A small square avatar mark sits beside assistant messages **and** beside the typing
+  indicator, so the assistant's identity is consistent between streaming and settled states.
+- The composer is custom-styled, not a default input.
+- A `~450ms` skeleton shows while a conversation's history loads on switch. Real network
+  latency exists even when rehydration works, so this is an honest loading state rather
+  than cover for a gap.
+- Failed replies render an error state with a working Retry action.
+
+- [ ] **Step 1: Compose the styled thread**
+
+Replace the bare `<Thread />` with assistant-ui's composable primitives, which accept
+`className` and `asChild` in the Radix style. Follow the structure in assistant-ui's
+docs for `ThreadPrimitive`, `MessagePrimitive`, and `ComposerPrimitive`, applying the
+tokens from Task 11.
+
+Keep each piece in its own file under `src/chat/` (`ThreadView.tsx`, `UserMessage.tsx`,
+`AssistantMessage.tsx`, `Composer.tsx`, `LoadingSkeleton.tsx`) rather than one large
+component — these are edited independently and reviewed independently.
+
+- [ ] **Step 2: Add the history-loading skeleton**
+
+Render the skeleton while the history adapter's `load()` is in flight, keyed on `threadId`
+so it appears on every conversation switch.
+
+- [ ] **Step 3: Add the error and retry state**
+
+Surface a failed run with the mockup's error treatment and a Retry action that re-sends the
+last user message. Verify against a real failure by setting `OPENAI_API_KEY` to an invalid
+value.
+
+- [ ] **Step 4: Verify against the mockup**
+
+Compare each artboard side by side with the running app: default conversation, empty
+conversation, zero-conversations first login, and the error state. Confirm the palette,
+bubble radius, column width, and avatar placement match.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add use_mem0/frontend/src
+git commit -m "feat: style chat surface to match the approved design"
+```
+
+---
+
+## Task 15: End-to-end acceptance
 
 **Files:**
 - Modify: `use_mem0/README.md`
