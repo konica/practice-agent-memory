@@ -221,3 +221,8 @@ __marimo__/
 .sandbox
 
 .claude/worktrees
+
+# The Python `lib/` rule above has no leading slash, so it matches at any depth
+# and also swallowed the frontend's shadcn `cn` helper (src/lib/utils.ts), which
+# every src/components/ui/*.tsx imports. Keep that TypeScript source tracked.
+!use_mem0/frontend/src/lib/
