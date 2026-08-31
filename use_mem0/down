@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# down — stop the mem0 chatbot. Keeps the database unless --clean.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+STATE_DIR=.dev
+CLEAN=0
+[ "${1:-}" = "--clean" ] && CLEAN=1
+
+# up records a process GROUP id (it starts services with setsid), so the whole
+# tree dies even when the npm/uv wrapper that led it has already exited. That is
+# why this never needs `pkill -f`, which would also kill a developer's other
+# uvicorn or vite in another window.
+stop() {                            # stop <name>
+  local name=$1 pf=$STATE_DIR/$name.pid pgid
+  [ -f "$pf" ] || return 0
+  pgid=$(cat "$pf")
+  if kill -0 -- "-$pgid" 2>/dev/null; then
+    kill -- "-$pgid" 2>/dev/null || true
+    for _ in $(seq 10); do kill -0 -- "-$pgid" 2>/dev/null || break; sleep 1; done
+    kill -9 -- "-$pgid" 2>/dev/null || true
+    echo "down: stopped $name"
+  fi
+  rm -f "$pf"
+}
+
+for name in web api; do stop "$name"; done
+
+if [ "$CLEAN" = 1 ]; then
+  # Drops the app-postgres-data volume: users, sessions, conversations and every
+  # LangGraph checkpoint. Only ever behind this explicit flag.
+  docker compose down --volumes --remove-orphans
+  rm -rf "$STATE_DIR"
+  echo "down: removed containers, volumes and $STATE_DIR"
+else
+  docker compose down --remove-orphans
+  echo "down: stopped (data kept — use ./down --clean to wipe it)"
+fi

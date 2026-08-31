@@ -226,3 +226,6 @@ __marimo__/
 # and also swallowed the frontend's shadcn `cn` helper (src/lib/utils.ts), which
 # every src/components/ui/*.tsx imports. Keep that TypeScript source tracked.
 !use_mem0/frontend/src/lib/
+
+# Local dev state written by use_mem0/up (pidfiles + logs)
+use_mem0/.dev/
