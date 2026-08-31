@@ -1,0 +1,134 @@
+/* Design tokens from the approved mockup. Values are the designer's canonical
+   list — do not re-derive them by inspecting the rendered mockup. */
+@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap");
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-heading: var(--font-sans);
+    --font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-destructive-foreground: var(--destructive-foreground);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+
+    /* error family — "destructive" is not one token in this design */
+    --color-error-bg: var(--error-bg);
+    --color-error-border: var(--error-border);
+    --color-error-text: var(--error-text);
+
+    /* project-specific colours */
+    --color-bubble-user-bg: var(--bubble-user-bg);
+    --color-bubble-skeleton-bg: var(--bubble-skeleton-bg);
+    --color-text-tertiary: var(--text-tertiary);
+    --color-text-account: var(--text-account);
+    --color-avatar-placeholder-bg: var(--avatar-placeholder-bg);
+
+    /* radius is a SCALE, not one value — do not apply --radius uniformly */
+    --radius-sm: var(--radius-input);   /* rename input */
+    --radius-mark: 7px;                 /* avatar and logo marks */
+    --radius-md: var(--radius);         /* interactive controls */
+    --radius-lg: var(--radius);         /* interactive controls */
+    --radius-xl: var(--radius-card);    /* cards and modals */
+    --radius-logo: 16px;                /* sign-in logo mark */
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+    /* shadcn semantic tokens — names kept, values replaced */
+    --background: #FAF9F6;
+    --foreground: #21201C;
+    --card: #FAF9F6;
+    --card-foreground: #21201C;
+    --popover: #FAF9F6;
+    --popover-foreground: #21201C;
+    --primary: #2E6F7E;
+    --primary-foreground: #FFFFFF;
+    --secondary: #F4F1EA;
+    --secondary-foreground: #21201C;
+    --muted: #F4F1EA;
+    --muted-foreground: #6B675F;
+    --accent: #E9E2D3;            /* active sidebar item fill */
+    --accent-foreground: #21201C;
+    --destructive: #9C4A2E;       /* delete button, retry button, error icon */
+    --destructive-foreground: #FFFFFF;
+    --border: #E7E4DD;
+    --input: #E7E4DD;
+    --ring: #2E6F7E;
+
+    /* radius scale — NOT a single value */
+    --radius-input: 6px;          /* rename input */
+    --radius: 10px;               /* interactive controls: buttons, conversation items, popovers */
+    --radius-card: 13px;          /* cards and modals */
+
+    /* message bubbles — directional; the sharp corner is the tail */
+    --radius-bubble-user: 14px 14px 2px 14px;
+    --radius-bubble-assistant: 14px 14px 14px 2px;
+
+    /* error family — "destructive" is not one token in this design */
+    --error-bg: #FBF1EC;
+    --error-border: #E7CFC4;
+    --error-text: #8A3F27;
+
+    /* project-specific */
+    --sidebar-width: 260px;
+    --message-max-width: 640px;
+    --bubble-user-bg: #EAF2F1;
+    --bubble-skeleton-bg: #ECE8DF;
+    --text-tertiary: #9A968C;     /* placeholder and caption text */
+    --text-account: #4B4740;      /* sidebar account-row name */
+    --avatar-placeholder-bg: #EFEBE3;
+
+    /* shadcn sidebar tokens, mapped onto the mockup palette */
+    --sidebar: #F4F1EA;
+    --sidebar-foreground: #21201C;
+    --sidebar-primary: #2E6F7E;
+    --sidebar-primary-foreground: #FFFFFF;
+    --sidebar-accent: #E9E2D3;
+    --sidebar-accent-foreground: #21201C;
+    --sidebar-border: #E7E4DD;
+    --sidebar-ring: #2E6F7E;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+    font-size: 14.5px;
+    line-height: 1.55;
+    }
+  html {
+    @apply font-sans;
+    }
+}
