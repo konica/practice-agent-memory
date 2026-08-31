@@ -15,6 +15,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from ..auth.session import SESSION_COOKIE, resolve_session
 from ..conversations.ownership import owns_conversation
+from ..conversations.store import touch_conversation
 
 AGENT_NAME = "mem0-chatbot"
 AGENT_PATH = "/agent"
@@ -63,6 +64,21 @@ def identify_run(payload: dict, user_sub: str, memory_enabled: bool) -> dict:
     }
 
 
+def first_user_message(payload: dict) -> str | None:
+    """The first thing the user said in this run, or None.
+
+    It names the conversation: `touch_conversation` only fills a NULL title, so
+    the first run's opening message becomes the title and every later run just
+    reorders the list.
+    """
+    for message in payload.get("messages") or []:
+        if isinstance(message, dict) and message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+    return None
+
+
 class AgentAuthMiddleware(BaseHTTPMiddleware):
     """Authenticate and authorise an AG-UI run before the adapter sees it."""
 
@@ -97,7 +113,15 @@ class AgentAuthMiddleware(BaseHTTPMiddleware):
         request._body = json.dumps(
             identify_run(payload, user_sub, request.app.state.settings.memory_retrieval_enabled)
         ).encode()
-        return await call_next(request)
+
+        # Read the title off the request rather than the response: the adapter
+        # answers with a stream that is still unconsumed when `call_next`
+        # returns, so the reply is not available here and is not wanted — the
+        # title is what the user said, and `updated_at` marks the run.
+        title = first_user_message(payload)
+        response = await call_next(request)
+        touch_conversation(request.app.state.pool, thread_id, title)
+        return response
 
 
 def add_agent_gate(app: FastAPI) -> None:
