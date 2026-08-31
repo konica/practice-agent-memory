@@ -1,0 +1,10 @@
+---
+- name: Provision local dev environment
+  hosts: localhost
+  connection: local
+  become: true
+  tasks:
+    - name: Install tmux (terminal multiplexer for long-running/background sessions)
+      ansible.builtin.package:
+        name: tmux
+        state: present
