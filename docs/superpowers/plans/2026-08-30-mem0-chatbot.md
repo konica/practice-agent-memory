@@ -3245,13 +3245,31 @@ git commit -m "docs: record end-to-end acceptance findings and mem0 behaviour"
 
 ## Deferred to a second iteration
 
-Recorded in the spec, deliberately excluded from this plan. Both require verifying mem0 API
-surfaces that the design work did not confirm — only `add` and `search` were verified — so
-each needs a research step before it can be planned.
+Recorded in the spec, deliberately excluded from this plan. Both originally required
+verifying mem0 API surfaces that the design work did not confirm — only `add` and `search`
+were verified. The forget item is now unblocked (see below); the extraction-control item
+still needs its own research step.
 
-- **Explicit forget capability** — "forget that I mentioned my address." Needs verification
-  of mem0's delete/update endpoints. Note this is what makes conversation deletion honest:
-  today, deleting a conversation leaves its derived memories in place.
+- **Explicit forget capability** — "forget that I mentioned my address." Note this is what
+  makes conversation deletion honest: today, deleting a conversation leaves its derived
+  memories in place.
+
+  **Research resolved 2026-08-31**, by reading `mem0/client/main.py` in the installed
+  `mem0ai` v2.0.19 package (the version pinned in `pyproject.toml`): `MemoryClient` has
+  `get(memory_id)`, `get_all(filters=...)`, `update(memory_id, text=..., metadata=..., ...)`,
+  `delete(memory_id, delete_linked=False)`, `delete_all(filters=...)`, `history(memory_id)`,
+  and `batch_update`/`batch_delete`. Every scoping/identity field (`user_id`, `run_id`,
+  `agent_id`, date range, categories) goes inside a `filters` dict — never as a top-level
+  kwarg — matching the pattern `search`/`add` already use in Task 6. Full detail and the
+  resulting design sketch are in the spec's [Planned second
+  iteration](../specs/2026-08-30-mem0-chatbot-design.md#planned-second-iteration) section.
+
+  Implementation is still gated on Task 6 landing (there is no `MemoryStore` to extend yet
+  in this repo), and on a small amendment to Task 6 itself: `MemoryStore.add` needs to also
+  pass `run_id=<conversation_id>` in `filters` so a conversation's memories can later be
+  targeted with `delete_all(filters={"user_id": ..., "run_id": conversation_id})`. Without
+  that tag, forgetting a whole conversation's memories isn't possible — only individual
+  memories found via `search` are. This should become its own task once Task 6 exists.
 - **Control over what gets extracted** — mem0 performs its own extraction on `add` with no
   steer from us. Needs verification that mem0 Platform exposes custom instructions or
   categories.
