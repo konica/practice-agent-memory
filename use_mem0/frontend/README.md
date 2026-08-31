@@ -4,11 +4,17 @@ React 19 + Vite + TypeScript. Tailwind CSS v4 with shadcn/ui, themed with the
 approved mockup's design tokens.
 
 ```bash
-npm install
+../npm-install   # not `npm install` — see below
 npm run dev      # http://localhost:5173
 npm run build    # tsc -b && vite build
 npm run lint
 ```
+
+`../npm-install` is a plain `npm install` wherever symlinks work. On filesystems
+that refuse them — including the `/c/...` mount this repo is often checked out
+on — npm cannot write `node_modules/.bin`, and `npm run dev` then fails with
+`sh: 1: vite: not found`; the wrapper installs with `--no-bin-links` and writes
+those entries as small shell scripts instead. `use_mem0/up` calls it for you.
 
 `VITE_API_BASE` points the typed API client at the backend (defaults to
 `http://localhost:8000`). See `.env.example`. Every call in `src/api.ts` sends

@@ -116,7 +116,11 @@ export UV_PROJECT_ENVIRONMENT
 # --project rather than `cd backend`: on this mount a process cannot read its own
 # working directory after writing to it.
 uv sync --quiet --all-extras --project backend
-[ -d frontend/node_modules ] || (cd frontend && npm install --silent)
+# Not `[ -d frontend/node_modules ] || npm install`: a half-finished install
+# leaves that directory behind, so the guard reads "installed" for a tree that
+# cannot start, and no amount of re-running ./up repairs it. npm is cheap when
+# already satisfied, same as the uv sync above.
+./npm-install --silent
 
 start api "$API_PORT" uv run --project backend \
       uvicorn app.main:app --factory --port "$API_PORT"

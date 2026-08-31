@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# npm-install — install the frontend's dependencies, symlinks or not.
+#
+# npm publishes each package's executables as symlinks in node_modules/.bin,
+# and that directory is what puts `vite` on PATH for `npm run dev`. Some
+# filesystems refuse symlink creation — notably the /c/... mount this repo is
+# often checked out on — and npm aborts the install when it gets there:
+#
+#   npm ERR! code EPERM
+#   npm ERR! syscall symlink
+#   npm ERR! dest .../node_modules/.bin/vite
+#
+# What it leaves behind is the confusing part: every package is unpacked, so
+# node_modules looks installed, but there is no .bin at all, and the next
+# `npm run dev` dies with "sh: 1: vite: not found".
+#
+# So probe for symlink support, exactly as venv-path does for the backend.
+# Where symlinks work this is a plain `npm install` and nothing about the
+# layout changes. Where they don't, install with --no-bin-links (npm's own
+# escape hatch for this case) and then write the .bin entries as small shell
+# scripts, which the mount is happy to store.
+set -euo pipefail
+cd "$(dirname "$0")/frontend"
+
+probe=.symlink-probe.$$
+if ln -s /dev/null "$probe" 2>/dev/null; then
+  rm -f "$probe"
+  exec npm install "$@"
+fi
+
+# A node_modules the symlink step already aborted in cannot be repaired in
+# place: npm replaces a package by renaming the old directory aside, and this
+# filesystem refuses that too, so every retry dies on the same package with
+#
+#   npm ERR! code EACCES
+#   npm ERR! syscall rename
+#
+# no matter how often ./up is re-run. A missing .bin is the signature of that
+# aborted install — the packages unpacked, the symlink step did not — so start
+# from a clean tree, the way up drops a .venv left without an interpreter.
+if [ -d node_modules ] && [ ! -d node_modules/.bin ]; then
+  echo "npm-install: removing node_modules left unfinished by an earlier install"
+  rm -rf node_modules
+fi
+
+npm install --no-bin-links "$@"
+
+# npm's own --silent should quiet this wrapper too, so that `up` — which passes
+# it — does not report the same unchanged line on every start.
+quiet=
+for arg in "$@"; do
+  if [ "$arg" = "--silent" ]; then quiet=1; fi
+done
+
+# Rebuild node_modules/.bin the way npm would have. Nested trees get their own
+# .bin too, because a dependency that shells out to its own private copy of a
+# tool looks it up there and not at the top level.
+NPM_INSTALL_QUIET="$quiet" node - <<'EOF_SHIMS'
+const fs = require('node:fs')
+const path = require('node:path')
+
+// npm names the shim after the bare package name, so @scope/pkg -> pkg.
+const shimsFor = (manifest) =>
+  typeof manifest.bin === 'string'
+    ? { [path.basename(manifest.name ?? '')]: manifest.bin }
+    : manifest.bin && typeof manifest.bin === 'object'
+      ? manifest.bin
+      : {}
+
+// npm's symlinks rely on the target's own shebang. Read it rather than assume
+// every bin is a node script — a few ship plain shell.
+const runsUnderNode = (target) => {
+  const fd = fs.openSync(target, 'r')
+  const head = Buffer.alloc(128)
+  const n = fs.readSync(fd, head, 0, head.length, 0)
+  fs.closeSync(fd)
+  return /^#!.*\bnode\b/.test(head.subarray(0, n).toString('utf8').split('\n')[0])
+}
+
+const writeShims = (binDir, pkgDir) => {
+  let manifest
+  try {
+    manifest = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'))
+  } catch {
+    return 0
+  }
+  let written = 0
+  for (const [name, rel] of Object.entries(shimsFor(manifest))) {
+    const target = path.join(pkgDir, rel)
+    if (!name || !fs.existsSync(target)) continue
+    fs.mkdirSync(binDir, { recursive: true })
+    const exec = runsUnderNode(target) ? 'exec node' : (fs.chmodSync(target, 0o755), 'exec')
+    const from = path.relative(binDir, target)
+    fs.writeFileSync(
+      path.join(binDir, name),
+      `#!/bin/sh\n${exec} "$(dirname "$0")/${from}" "$@"\n`,
+      { mode: 0o755 },
+    )
+    written++
+  }
+  return written
+}
+
+const linkTree = (nodeModules) => {
+  let written = 0
+  let entries
+  try {
+    entries = fs.readdirSync(nodeModules, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  const packages = []
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+    const dir = path.join(nodeModules, entry.name)
+    if (entry.name.startsWith('@')) {
+      for (const scoped of fs.readdirSync(dir)) packages.push(path.join(dir, scoped))
+    } else {
+      packages.push(dir)
+    }
+  }
+  for (const pkgDir of packages) {
+    written += writeShims(path.join(nodeModules, '.bin'), pkgDir)
+    written += linkTree(path.join(pkgDir, 'node_modules'))
+  }
+  return written
+}
+
+const written = linkTree('node_modules')
+if (!process.env.NPM_INSTALL_QUIET) {
+  console.log(`npm-install: wrote ${written} node_modules/.bin entries (no symlinks on this filesystem)`)
+}
+EOF_SHIMS
