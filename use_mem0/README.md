@@ -19,15 +19,15 @@ start both processes and sign in with Google; there is no chat endpoint behind i
 | Google OAuth + server-side sessions (`/auth/*`) | done |
 | mem0 memory wrapper, graph nodes, compiled graph | done, unit-tested |
 | Frontend scaffold, design tokens, auth gate | done |
-| `/conversations` registry | not built — issue #5 |
+| `/conversations` registry with ownership enforcement | done, tested |
 | AG-UI `/agent` endpoint | not built — issue #9 |
 | Conversation history endpoint | not built — issue #10 |
 | Sidebar, chat surface styling | not built — issues #13, #17 |
 
 Concretely: `build_graph()` is implemented and tested, but nothing exposes it over HTTP —
-`create_app()` mounts only the auth router and `/health`. `src/api.ts` already calls
-`/conversations*`, and those routes return 404 until #5/#10 land. `Workspace.tsx` is a
-placeholder that renders `signed in`.
+`create_app()` mounts the auth and conversations routers and `/health`. `src/api.ts` can
+list, create, rename and delete conversations; `GET /conversations/{id}/messages` still
+returns 404 until #10 lands. `Workspace.tsx` is a placeholder that renders `signed in`.
 
 ## Architecture
 
@@ -134,6 +134,10 @@ use_mem0/
         google.py             authorization URL, code exchange, id-token verify
         session.py            create/resolve/revoke; get_current_user dependency
         routes.py             /auth/login, /callback, /me, /logout
+      conversations/
+        store.py              CRUD; title set once, delete clears checkpoints
+        ownership.py          the one owner check; 404, never 403
+        routes.py             /conversations list, create, rename, delete
       agent/
         state.py              ChatState
         memory.py             MemoryStore: mem0 wrapper that never raises
@@ -207,11 +211,12 @@ session cookie and the app renders the `Workspace` placeholder.
 ## Tests
 
 ```bash
-make test              # 40 tests
+make test              # 55 tests
 ```
 
 > **The suite needs the compose Postgres running (`make up` starts it), and it is destructive.** `test_migrate.py`
-> drops `conversations`, `auth_sessions` and `users` in the target database, and `test_graph.py`
+> drops `conversations`, `auth_sessions` and `users` in the target database,
+> `test_conversations.py` empties those three tables, and `test_graph.py`
 > writes real checkpoints. Both default to `postgresql://app:app@localhost:5432/app` — the same
 > database the dev server uses. Point `TEST_DATABASE_URL` at a scratch database if you have
 > local data worth keeping.

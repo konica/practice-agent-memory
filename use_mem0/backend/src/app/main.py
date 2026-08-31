@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .auth.routes import router as auth_router
 from .config import Settings, load_settings
+from .conversations.routes import router as conversations_router
 from .db.engine import open_pool
 from .db.migrate import run_migrations
 
@@ -31,6 +32,7 @@ def create_app(settings: Settings) -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(auth_router)
+    app.include_router(conversations_router)
 
     @app.get("/health")
     def health() -> dict[str, str]:
