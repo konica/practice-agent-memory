@@ -53,6 +53,15 @@ Confirmed against official docs as of August 2026:
 - `mem0ai` (PyPI v2.0.19) — cloud client is `from mem0 import MemoryClient`
   (`AsyncMemoryClient` for async). Auth via `MEM0_API_KEY`.
   API: `client.add(messages, user_id=...)`, `client.search(query, filters={"user_id": ...})`.
+- `MemoryClient` delete/update surface (confirmed 2026-08-31 by reading
+  `mem0/client/main.py` in the installed v2.0.19 package — the blocker noted below is
+  resolved): `client.get(memory_id)`, `client.get_all(filters=..., page=..., page_size=...)`,
+  `client.update(memory_id, text=...)`, `client.delete(memory_id, delete_linked=False)`,
+  `client.delete_all(filters=...)`, `client.history(memory_id)`, plus `batch_update` /
+  `batch_delete` for multi-ID operations. All of `get_all`/`search`/`delete_all` take identity
+  and scoping filters (`user_id`, `run_id`, `agent_id`, date range, categories) only inside a
+  `filters` dict, never as top-level kwargs. See
+  [Explicit forget capability](#planned-second-iteration) for how this maps onto the feature.
 - `langsmith` (PyPI v0.11.2) — separate install. **No manual callback wiring needed**;
   LangGraph runnables auto-trace once env vars are set.
 - `langgraph-checkpoint-postgres` (PyPI v3.1.2) — `PostgresSaver` /
@@ -510,14 +519,36 @@ Two independent processes, one Compose file, secrets only in `.env`.
 ## Planned second iteration
 
 Deliberately excluded from this spec, but expected next — recorded here so they are not
-rediscovered as surprises. **Both require verifying mem0 API surfaces that this design work
-did not confirm** (only `add` and `search` were verified against the docs), so each needs a
-research step before planning.
+rediscovered as surprises. **Both originally required verifying mem0 API surfaces that this
+design work did not confirm** (only `add` and `search` were verified against the docs); the
+forget item below is now unblocked, and the extraction-control item is resolved.
 
-- **Explicit forget capability.** The ability to say "forget that I mentioned my address."
-  A memory system that can only accumulate is a liability, and this forces engagement with
-  mem0's delete/update API rather than only `add`/`search`. Needs verification of mem0's
-  delete and update endpoints. Tracked as issue #15.
+- **Explicit forget capability** — unblocked. The ability to say "forget that I mentioned my
+  address." A memory system that can only accumulate is a liability, and this forces
+  engagement with mem0's delete/update API rather than only `add`/`search`.
+
+  mem0's delete/update surface is confirmed (see [Verified package
+  facts](#verified-package-facts)): `search` locates candidate memories, `delete(memory_id)`
+  removes one, `delete_all(filters=...)` removes a scoped set, and `update(memory_id, ...)`
+  edits one in place. The design shape this implies:
+
+  1. A chat-driven flow reuses the existing `search` call already in `MemoryStore` to find
+     the memory (or memories) matching what the user wants forgotten, surfaces them for
+     confirmation — same "delete is always an explicit confirmation step" rule the
+     conversation-delete dialog already follows — then calls `delete(memory_id)` for each
+     confirmed ID.
+  2. **This closes the conversation-delete gap** (see [Interaction with mem0 —
+     important](#interaction-with-mem0--important)) only if memories are attributable to the
+     conversation that produced them. Today's `MemoryStore.add` (Task 6) scopes memories by
+     `user_id` alone; deleting a conversation cannot cascade to "the memories it produced"
+     without also passing `run_id=<conversation_id>` inside `add`'s `filters`, so that a later
+     `delete_all(filters={"user_id": ..., "run_id": conversation_id})` can target exactly
+     that conversation's memories. That's a small amendment to Task 6, not something this
+     research note changes on its own — flag it when Task 6 is implemented or revisited.
+  3. Needs a new backend surface (route(s) plus, likely, an agent tool/node) that isn't
+     designed here — left to the implementation task, now that the blocking question is
+     answered.
+
 - ~~**Control over what gets extracted.**~~ Resolved — see
   [Extraction control](#extraction-control). mem0 Platform confirmed to expose
   `custom_instructions`; folded into Task 6's `write_memories` implementation rather than
