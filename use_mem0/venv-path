@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Print the directory uv should use as the backend's virtualenv.
+#
+# uv builds .venv/bin/python as a symlink to the interpreter. Some filesystems
+# refuse symlink creation — notably the /c/... mount this repo is often checked
+# out on — and uv then leaves behind a .venv with no interpreter in it. Every
+# later uv command fails with:
+#
+#   error: Project virtual environment directory .../.venv cannot be used
+#   because it is not a valid Python environment (no Python executable found)
+#
+# So probe for symlink support where the venv would go, and fall back to
+# ~/.venvs/<project-name>, which is on a filesystem that allows them. Anywhere
+# symlinks work — a normal machine, CI — this prints backend/.venv and nothing
+# about the layout changes.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+# An explicit choice always wins.
+if [ -n "${UV_PROJECT_ENVIRONMENT:-}" ]; then
+  echo "$UV_PROJECT_ENVIRONMENT"
+  exit 0
+fi
+
+probe=backend/.symlink-probe.$$
+if ln -s /dev/null "$probe" 2>/dev/null; then
+  rm -f "$probe"
+  echo "$PWD/backend/.venv"
+  exit 0
+fi
+
+# Named after the project so sibling checkouts get their own environment
+# instead of silently sharing one.
+name=$(sed -n 's/^name *= *"\(.*\)"/\1/p' backend/pyproject.toml | head -1)
+echo "$HOME/.venvs/${name:-$(basename "$PWD")-backend}"

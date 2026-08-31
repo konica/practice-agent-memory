@@ -28,7 +28,7 @@ logs: ## Follow the backend and frontend logs
 	@tail -f $(APP)/.dev/*.log
 
 test: ## Run the backend suite (needs a running Postgres: make up)
-	@cd $(APP)/backend && uv run pytest
+	@cd $(APP)/backend && UV_PROJECT_ENVIRONMENT="$$(../venv-path)" uv run pytest
 
 build: ## Production build of the frontend
 	@cd $(APP)/frontend && npm run build
