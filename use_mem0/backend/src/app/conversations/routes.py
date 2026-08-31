@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Body, Depends, Request
 
+from ..agent.graph import read_messages
 from ..auth.session import get_current_user
 from .ownership import require_owned_conversation
 from .store import (
@@ -41,3 +42,21 @@ def delete(
 ) -> dict:
     delete_conversation(request.app.state.pool, conversation_id, user_sub)
     return {"ok": True}
+
+
+@router.get("/{conversation_id}/messages")
+def messages(
+    request: Request,
+    conversation_id: str = Depends(require_owned_conversation),
+) -> dict:
+    """Transcript for assistant-ui's history adapter.
+
+    Read from the LangGraph checkpointer rather than a table of our own: the
+    checkpointer is the source of truth for message content. A table of ours
+    would be a second copy to keep in step with what the graph actually replayed.
+
+    Sync `def`, so FastAPI runs it on a worker thread: the app's checkpointer
+    is the async saver, and it refuses its own synchronous interface when called
+    from the loop it was built on. `async def` here would raise, not read.
+    """
+    return {"messages": read_messages(request.app.state.graph, conversation_id)}
