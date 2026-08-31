@@ -97,9 +97,25 @@ export FRONTEND_ORIGIN="${FRONTEND_ORIGIN:-http://localhost:$WEB_PORT}"
 # there is no container name to hardcode and nothing to poll by hand.
 docker compose up -d --wait
 
+# A .venv from a failed symlink attempt has no interpreter, and every uv command
+# then fails with "not a valid Python environment". Clear it rather than leaving
+# the developer to decode that message.
+if [ -d backend/.venv ] && [ ! -x backend/.venv/bin/python ]; then
+  echo "up: removing broken backend/.venv (no interpreter in it)"
+  rm -rf backend/.venv
+fi
+
+# Where uv may put the environment depends on whether this filesystem allows
+# symlinks; venv-path works that out. Exporting it also covers the `uv run`
+# below, and anything else this script starts.
+UV_PROJECT_ENVIRONMENT="$(./venv-path)"
+export UV_PROJECT_ENVIRONMENT
+
 # Cheap when already satisfied, which is what keeps `up` a single command.
 # Migrations are not run here: create_app()'s lifespan runs them at startup.
-(cd backend && uv sync --quiet --all-extras)
+# --project rather than `cd backend`: on this mount a process cannot read its own
+# working directory after writing to it.
+uv sync --quiet --all-extras --project backend
 [ -d frontend/node_modules ] || (cd frontend && npm install --silent)
 
 start api "$API_PORT" uv run --project backend \

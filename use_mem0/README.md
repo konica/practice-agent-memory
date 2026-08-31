@@ -121,6 +121,7 @@ immediately instead of waiting out a token's lifetime.
   Makefile                    (repo root) make up / down / clean / test / logs
 use_mem0/
   up, down                    start / stop everything (see Running in dev)
+  venv-path                   where uv should put the backend virtualenv
   docker-compose.yml          Postgres 16, healthcheck, named volume
   backend/
     src/app/
@@ -230,6 +231,17 @@ make lint          # oxlint
 
 ## Gotchas
 
+- **The virtualenv may not live in `backend/.venv`.** uv builds `.venv/bin/python`
+  as a symlink, and some filesystems (including the `/c/...` mount this repo is
+  often checked out on) refuse to create symlinks — uv then leaves a `.venv` with
+  no interpreter and every later command fails with *"not a valid Python
+  environment"*. `use_mem0/venv-path` prints the directory actually in use, and
+  `up` and `make test` both consult it. Running uv by hand needs the same:
+  ```bash
+  cd use_mem0/backend
+  UV_PROJECT_ENVIRONMENT="$(../venv-path)" uv run pytest
+  ```
+  Where symlinks work this is just `backend/.venv` and nothing changes.
 - **Cookies are `secure=False`, `samesite=lax`.** Fine over `http://localhost`; must be
   revisited before any non-local deployment.
 - **CORS allows exactly one origin.** If the frontend is not on `FRONTEND_ORIGIN`, browser
