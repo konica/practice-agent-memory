@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# up — start the mem0 chatbot, then say where it is.
+#
+# Postgres, the FastAPI backend and the Vite frontend. Safe to run twice.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+STATE_DIR=.dev                      # pidfiles + logs; gitignored
+mkdir -p "$STATE_DIR"
+
+# ------------------------------------------------------------------ harness --
+need() {                            # need <tool> <how-to-get-it>
+  command -v "$1" >/dev/null 2>&1 || { echo "up: missing '$1' — $2" >&2; exit 1; }
+}
+
+load_env() {                        # export a .env the app itself never reads
+  [ -f "$1" ] || return 0
+  set -a; . "$1"; set +a
+}
+
+need_env() {                        # need_env VAR...
+  local miss=()
+  for v in "$@"; do [ -n "${!v:-}" ] || miss+=("$v"); done
+  [ ${#miss[@]} -eq 0 ] && return 0
+  echo "up: missing env: ${miss[*]}" >&2
+  echo "    set them in use_mem0/.env (see .env.example)" >&2
+  exit 1
+}
+
+# Wrappers (npm, uv run) exec or exit, so the pid captured at launch is a corpse
+# while the server it started keeps serving. Track the process GROUP instead —
+# `start` uses setsid, which makes the recorded pid a pgid.
+alive() {
+  local pf=$STATE_DIR/$1.pid
+  [ -f "$pf" ] && kill -0 -- "-$(cat "$pf")" 2>/dev/null
+}
+
+# Probe BOTH loopback stacks: uvicorn binds IPv4-only here and Vite IPv6-only,
+# so a single-stack probe reports "free" for a port that is very much taken.
+port_busy() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0
+  (exec 3<>"/dev/tcp/::1/$1")       2>/dev/null && return 0
+  return 1
+}
+
+start() {                           # start <name> <port> <command...>
+  local name=$1 port=$2; shift 2
+  if alive "$name"; then echo "up: $name already running"; return 0; fi
+  # A free-port check, not a health check: whatever answers on this port may
+  # belong to another project entirely, and must never read as "ours".
+  if port_busy "$port"; then
+    echo "up: port $port is in use by a process ./up did not start." >&2
+    echo "    stop it, or re-run with $(echo "$name" | tr a-z A-Z)_PORT=<free port>" >&2
+    exit 1
+  fi
+  setsid nohup "$@" >"$STATE_DIR/$name.log" 2>&1 &
+  echo $! >"$STATE_DIR/$name.pid"   # setsid makes this pid the process group id
+  echo "up: started $name (pgid $!) → $STATE_DIR/$name.log"
+}
+
+wait_for() {                        # wait_for <url> <name> [timeout-seconds]
+  local url=$1 name=$2 limit=${3:-90} n=0
+  while :; do
+    # Liveness FIRST: if our process died and something else is listening on
+    # that port, trusting the URL would make `up` exit 0 while the app is down.
+    if ! alive "$name"; then
+      echo "up: $name is not running:" >&2
+      tail -20 "$STATE_DIR/$name.log" >&2; exit 1
+    fi
+    curl -fs -o /dev/null "$url" 2>/dev/null && return 0
+    n=$((n + 1))
+    if [ "$n" -ge "$limit" ]; then
+      echo "up: $name not ready after ${limit}s:" >&2
+      tail -20 "$STATE_DIR/$name.log" >&2; exit 1
+    fi
+    sleep 1
+  done
+}
+
+# ----------------------------------------------------------------- SERVICES --
+need docker "https://docs.docker.com/get-docker/"
+need uv     "https://docs.astral.sh/uv/getting-started/installation/"
+need npm    "https://nodejs.org"
+need curl   "install curl"
+
+# app/config.py reads os.environ and there is no dotenv dependency, so nothing
+# else loads this file.
+load_env .env
+need_env OPENAI_API_KEY MEM0_API_KEY LANGSMITH_API_KEY LANGSMITH_PROJECT \
+         GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET DATABASE_URL SESSION_SECRET
+
+: "${API_PORT:=8000}"
+: "${WEB_PORT:=5173}"
+export FRONTEND_ORIGIN="${FRONTEND_ORIGIN:-http://localhost:$WEB_PORT}"
+
+# --wait blocks on the healthcheck already declared in docker-compose.yml, so
+# there is no container name to hardcode and nothing to poll by hand.
+docker compose up -d --wait
+
+# Cheap when already satisfied, which is what keeps `up` a single command.
+# Migrations are not run here: create_app()'s lifespan runs them at startup.
+(cd backend && uv sync --quiet --all-extras)
+[ -d frontend/node_modules ] || (cd frontend && npm install --silent)
+
+start api "$API_PORT" uv run --project backend \
+      uvicorn app.main:app --factory --port "$API_PORT"
+start web "$WEB_PORT" npm --prefix frontend run dev -- \
+      --port "$WEB_PORT" --strictPort
+
+wait_for "http://localhost:$API_PORT/health" api
+wait_for "http://localhost:$WEB_PORT"        web
+
+# make exports MAKELEVEL, so the hint names the command the developer actually
+# used. `./down` is wrong from the repo root; `make down` is wrong without make.
+if [ -n "${MAKELEVEL:-}" ]; then stop_hint="make down"; else stop_hint="./down"; fi
+
+cat <<EOF
+
+  app   http://localhost:$WEB_PORT
+  api   http://localhost:$API_PORT
+  logs  $STATE_DIR/*.log
+  stop  $stop_hint
+EOF

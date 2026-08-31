@@ -118,7 +118,9 @@ immediately instead of waiting out a token's lifetime.
 ### Layout
 
 ```
+  Makefile                    (repo root) make up / down / clean / test / logs
 use_mem0/
+  up, down                    start / stop everything (see Running in dev)
   docker-compose.yml          Postgres 16, healthcheck, named volume
   backend/
     src/app/
@@ -147,96 +149,68 @@ use_mem0/
 
 ## Running in dev
 
+```bash
+cp use_mem0/.env.example use_mem0/.env    # fill in the real values
+make up
+```
+
+`make up` starts Postgres, the backend and the frontend, waits until each
+actually answers, and prints the URLs. It is safe to run twice. `make down`
+stops everything and keeps your data; `make clean` also drops the database
+volume. `make` on its own lists every target.
+
+The Makefile is a front door: the logic lives in `use_mem0/up` and
+`use_mem0/down`, which you can run directly (`cd use_mem0 && ./up`) if you
+prefer. There is one implementation, not two.
+
 ### Prerequisites
 
 - Docker (for Postgres)
 - [uv](https://docs.astral.sh/uv/) and Python 3.11+
 - Node 20+ (no `engines` field is declared; verified on Node 22)
 
-You also need credentials for OpenAI, mem0 Platform, LangSmith, and a Google OAuth client.
+Plus credentials for OpenAI, mem0 Platform, LangSmith, and a Google OAuth client.
+Every key in `REQUIRED_KEYS` must be non-empty; `up` names the missing ones and
+stops before starting anything. `DATABASE_URL` already matches the compose
+credentials.
 
-### 1. Start Postgres
+`up` exports `.env` itself, because `load_settings()` reads `os.environ` and
+nothing else loads that file.
 
-```bash
-cd use_mem0
-docker compose up -d app-postgres
-```
+### Register the Google OAuth redirect URI
 
-Postgres 16 on `localhost:5432`, database/user/password all `app`, stored in the named volume
-`app-postgres-data`. Wait for health with `docker compose ps`.
-
-### 2. Configure the backend
-
-```bash
-cp .env.example .env      # then fill in the real values
-```
-
-Every key in `REQUIRED_KEYS` must be non-empty or startup raises `MissingConfigError` listing
-exactly what is missing. `DATABASE_URL` already matches the compose credentials.
-
-> **The backend does not read `.env` itself.** `load_settings()` reads `os.environ`, and there
-> is no dotenv dependency. Export the file into your shell before starting the server:
->
-> ```bash
-> set -a && . ../.env && set +a
-> ```
-
-`MEMORY_RETRIEVAL_ENABLED=false` turns off *recall* while still writing memories — useful for
-comparing answers with and without memory. `FRONTEND_ORIGIN` is the single origin allowed by
-CORS, with credentials enabled.
-
-### 3. Register the Google OAuth redirect URI
-
-The callback URL is derived from the incoming request, so for a backend on port 8000 register
-exactly:
+The one step no script can do for you. The callback URL is derived from the
+incoming request, so for the default port register exactly:
 
 ```
 http://localhost:8000/auth/callback
 ```
 
-Change the port and this changes with it.
+Run on another port (`API_PORT=8001 make up`) and this changes with it.
 
-### 4. Run the backend
+### Knobs
 
-```bash
-cd backend
-uv sync --all-extras
-uv run uvicorn app.main:app --factory --reload --port 8000
-```
+| Variable | Effect |
+| --- | --- |
+| `API_PORT`, `WEB_PORT` | Override the default 8000 / 5173 |
+| `MEMORY_RETRIEVAL_ENABLED=false` | Suppresses *recall* while still writing memories — for comparing answers with and without memory |
+| `FRONTEND_ORIGIN` | The single origin CORS allows, with credentials. Defaults to the web URL `up` serves |
+| `VITE_API_BASE` | Points the frontend client at the backend (`frontend/.env.example`) |
 
-`--factory` is required: `app` is a function, not a module-level instance, so that importing
-`app.main` never reads the environment. Migrations run on startup, so first boot creates the
-three application tables and the four checkpointer tables.
+Logs are in `use_mem0/.dev/` (`make logs` follows them). Migrations run on
+backend startup, so the first `make up` creates the three application tables and
+the four checkpointer tables.
 
-Check it:
-
-```bash
-curl http://localhost:8000/health          # {"status":"ok"}
-curl -i http://localhost:8000/auth/me      # 401 until you sign in
-```
-
-### 5. Run the frontend
-
-```bash
-cd frontend
-npm install
-npm run dev        # http://localhost:5173
-```
-
-`VITE_API_BASE` (see `frontend/.env.example`) points the client at the backend and defaults to
-`http://localhost:8000`.
-
-Open http://localhost:5173 and sign in. On success you land back on the frontend with a
+Open the app URL and sign in. On success you land back on the frontend with a
 session cookie and the app renders the `Workspace` placeholder.
 
 ## Tests
 
 ```bash
-cd backend
-uv run pytest          # 40 tests
+make test              # 40 tests
 ```
 
-> **The suite needs the compose Postgres running, and it is destructive.** `test_migrate.py`
+> **The suite needs the compose Postgres running (`make up` starts it), and it is destructive.** `test_migrate.py`
 > drops `conversations`, `auth_sessions` and `users` in the target database, and `test_graph.py`
 > writes real checkpoints. Both default to `postgresql://app:app@localhost:5432/app` — the same
 > database the dev server uses. Point `TEST_DATABASE_URL` at a scratch database if you have
@@ -245,9 +219,8 @@ uv run pytest          # 40 tests
 Frontend:
 
 ```bash
-cd frontend
-npm run build      # tsc -b && vite build
-npm run lint       # oxlint
+make build         # tsc -b && vite build
+make lint          # oxlint
 ```
 
 ## Gotchas
