@@ -316,6 +316,54 @@ as designed.
 Writes are unaffected by the toggle. `write_memories` always runs, so a comparison session
 does not create a gap in the user's memory history.
 
+### Extraction control
+
+**Resolved (was blocked on research — see issue #16).** mem0 Platform exposes two levers
+over what `add` extracts, both confirmed against the current docs:
+
+- **`custom_instructions`** — a natural-language guideline string. Settable project-wide via
+  `client.project.update(custom_instructions=...)`, or per call as a `custom_instructions`
+  kwarg on `client.add(...)`, which overrides the project setting for that call only.
+- **`custom_categories`** — a list of `{name: description}` categories mem0 tags memories
+  with. Settable project-wide via `client.project.update(custom_categories=...)`, or per call
+  on `add(...)`; a per-call list fully replaces the project list rather than merging with it.
+  The built-in defaults (`personal_details`, `family`, `professional_details`, `sports`,
+  `travel`, `food`, `music`, `health`, `technology`, `hobbies`, `fashion`, `entertainment`,
+  `milestones`, `user_preferences`, `misc`) already cover what a general personal assistant
+  needs to track.
+
+**Decision: use `custom_instructions`, passed per call from `write_memories`; do not define
+`custom_categories`.** The default categories are broad enough for this app's scenario, and
+adding project-specific ones would be tuning without a use case that needs it. Extraction
+quality — what counts as worth remembering — is the actual gap: mem0 with no steer has no
+way to know this is a personal assistant rather than, say, a support bot, and no way to know
+which facts a user would consider sensitive enough to withhold by default.
+
+`write_memories` (Task 6, `MemoryStore.add`) passes a fixed instruction string:
+
+```python
+CUSTOM_INSTRUCTIONS = (
+    "Extract only durable facts about the user that would help a personal assistant "
+    "serve them better across future conversations: stable preferences, interests, "
+    "constraints, relationships, and professional or personal context they share about "
+    "themselves.\n\n"
+    "Do not extract one-off requests or tasks (e.g. \"remind me to...\"), transient "
+    "conversational content, or sensitive identifiers such as passwords, API keys, "
+    "financial account or card numbers, or government ID numbers, even if the user "
+    "states them."
+)
+```
+
+Kept as a per-call argument rather than a one-time `client.project.update()` provisioning
+step: everything about this app's mem0 configuration stays in version control and requires
+no manual dashboard or setup-script step, consistent with how the rest of the stack is
+configured from `.env` and code alone.
+
+**Follow-up, once observed:** whether this instruction actually changes what gets stored is
+an empirical question, same as memory conflict handling above — worth a line in the README's
+acceptance findings (Task 15) once `write_memories` exists and can be exercised against real
+mem0 Platform calls.
+
 ## Data flow — one chat turn
 
 1. **Frontend** sends the user's message to `/agent` over SSE, carrying the current
@@ -346,8 +394,9 @@ does not create a gap in the user's memory history.
    turn proceeds with no recall.
 5. **`call_model`** — OpenAI call using that system prompt, the message history LangGraph
    restored from the checkpointer, and the new user message.
-6. **`write_memories`** — `mem0.add(messages=[user_msg, assistant_reply], user_id=uid)`.
-   mem0 performs extraction on its side.
+6. **`write_memories`** — `mem0.add(messages=[user_msg, assistant_reply], user_id=uid,
+   custom_instructions=CUSTOM_INSTRUCTIONS)`. mem0 performs extraction on its side, steered
+   by the instructions decided in [Extraction control](#extraction-control) above.
 7. **Streaming back** — the AG-UI adapter emits `RUN_STARTED` → per-node events →
    `MESSAGES_SNAPSHOT` with the assistant reply → `RUN_FINISHED`. assistant-ui's runtime
    renders these incrementally.
@@ -472,8 +521,7 @@ Two independent processes, one Compose file, secrets only in `.env`.
 Deliberately excluded from this spec, but expected next — recorded here so they are not
 rediscovered as surprises. **Both originally required verifying mem0 API surfaces that this
 design work did not confirm** (only `add` and `search` were verified against the docs); the
-forget item below is now unblocked, the extraction-control item still needs its own research
-step.
+forget item below is now unblocked, and the extraction-control item is resolved.
 
 - **Explicit forget capability** — unblocked. The ability to say "forget that I mentioned my
   address." A memory system that can only accumulate is a liability, and this forces
@@ -501,10 +549,10 @@ step.
      designed here — left to the implementation task, now that the blocking question is
      answered.
 
-- **Control over what gets extracted.** mem0 performs its own extraction on `add`, and this
-  design gives it no steer, so it may store things the user would rather it did not.
-  Deciding whether to constrain extraction via custom instructions or categories is a real
-  requirements question. Needs verification that mem0 Platform exposes such controls.
+- ~~**Control over what gets extracted.**~~ Resolved — see
+  [Extraction control](#extraction-control). mem0 Platform confirmed to expose
+  `custom_instructions`; folded into Task 6's `write_memories` implementation rather than
+  deferred, since no separate research or design work remained once the API was confirmed.
 
 ## Out of scope
 
