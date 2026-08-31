@@ -34,5 +34,6 @@ if [ "$CLEAN" = 1 ]; then
   echo "down: removed containers, volumes and $STATE_DIR"
 else
   docker compose down --remove-orphans
-  echo "down: stopped (data kept — use ./down --clean to wipe it)"
+  if [ -n "${MAKELEVEL:-}" ]; then clean_hint="make clean"; else clean_hint="./down --clean"; fi
+  echo "down: stopped (data kept — use $clean_hint to wipe it)"
 fi

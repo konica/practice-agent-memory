@@ -110,10 +110,14 @@ start web "$WEB_PORT" npm --prefix frontend run dev -- \
 wait_for "http://localhost:$API_PORT/health" api
 wait_for "http://localhost:$WEB_PORT"        web
 
+# make exports MAKELEVEL, so the hint names the command the developer actually
+# used. `./down` is wrong from the repo root; `make down` is wrong without make.
+if [ -n "${MAKELEVEL:-}" ]; then stop_hint="make down"; else stop_hint="./down"; fi
+
 cat <<EOF
 
   app   http://localhost:$WEB_PORT
   api   http://localhost:$API_PORT
   logs  $STATE_DIR/*.log
-  stop  ./down
+  stop  $stop_hint
 EOF

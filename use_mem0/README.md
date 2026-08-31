@@ -118,6 +118,7 @@ immediately instead of waiting out a token's lifetime.
 ### Layout
 
 ```
+  Makefile                    (repo root) make up / down / clean / test / logs
 use_mem0/
   up, down                    start / stop everything (see Running in dev)
   docker-compose.yml          Postgres 16, healthcheck, named volume
@@ -149,14 +150,18 @@ use_mem0/
 ## Running in dev
 
 ```bash
-cd use_mem0
-cp .env.example .env    # fill in the real values
-./up
+cp use_mem0/.env.example use_mem0/.env    # fill in the real values
+make up
 ```
 
-`./up` starts Postgres, the backend and the frontend, waits until each actually
-answers, and prints the URLs. It is safe to run twice. `./down` stops everything
-and keeps your data; `./down --clean` also drops the database volume.
+`make up` starts Postgres, the backend and the frontend, waits until each
+actually answers, and prints the URLs. It is safe to run twice. `make down`
+stops everything and keeps your data; `make clean` also drops the database
+volume. `make` on its own lists every target.
+
+The Makefile is a front door: the logic lives in `use_mem0/up` and
+`use_mem0/down`, which you can run directly (`cd use_mem0 && ./up`) if you
+prefer. There is one implementation, not two.
 
 ### Prerequisites
 
@@ -181,7 +186,7 @@ incoming request, so for the default port register exactly:
 http://localhost:8000/auth/callback
 ```
 
-Run on another port (`API_PORT=8001 ./up`) and this changes with it.
+Run on another port (`API_PORT=8001 make up`) and this changes with it.
 
 ### Knobs
 
@@ -192,8 +197,9 @@ Run on another port (`API_PORT=8001 ./up`) and this changes with it.
 | `FRONTEND_ORIGIN` | The single origin CORS allows, with credentials. Defaults to the web URL `up` serves |
 | `VITE_API_BASE` | Points the frontend client at the backend (`frontend/.env.example`) |
 
-Logs are in `use_mem0/.dev/`. Migrations run on backend startup, so the first
-`./up` creates the three application tables and the four checkpointer tables.
+Logs are in `use_mem0/.dev/` (`make logs` follows them). Migrations run on
+backend startup, so the first `make up` creates the three application tables and
+the four checkpointer tables.
 
 Open the app URL and sign in. On success you land back on the frontend with a
 session cookie and the app renders the `Workspace` placeholder.
@@ -201,11 +207,10 @@ session cookie and the app renders the `Workspace` placeholder.
 ## Tests
 
 ```bash
-cd backend
-uv run pytest          # 40 tests
+make test              # 40 tests
 ```
 
-> **The suite needs the compose Postgres running (`./up` starts it), and it is destructive.** `test_migrate.py`
+> **The suite needs the compose Postgres running (`make up` starts it), and it is destructive.** `test_migrate.py`
 > drops `conversations`, `auth_sessions` and `users` in the target database, and `test_graph.py`
 > writes real checkpoints. Both default to `postgresql://app:app@localhost:5432/app` — the same
 > database the dev server uses. Point `TEST_DATABASE_URL` at a scratch database if you have
@@ -214,9 +219,8 @@ uv run pytest          # 40 tests
 Frontend:
 
 ```bash
-cd frontend
-npm run build      # tsc -b && vite build
-npm run lint       # oxlint
+make build         # tsc -b && vite build
+make lint          # oxlint
 ```
 
 ## Gotchas
