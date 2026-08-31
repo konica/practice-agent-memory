@@ -8,3 +8,9 @@
       ansible.builtin.package:
         name: tmux
         state: present
+
+    - name: Install CodeGraph CLI/MCP server (code-structure indexing for coding agents)
+      community.general.npm:
+        name: "@colbymchenry/codegraph"
+        global: true
+        state: present
