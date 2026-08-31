@@ -10,8 +10,9 @@ consolidation behaviour stays visible.
 
 ## Status
 
-The backend and frontend both run today, but **the chat path is not wired up yet**. You can
-start both processes and sign in with Google; there is no chat endpoint behind it.
+The backend serves chat today; the frontend does not yet render it. You can start both
+processes, sign in with Google, and drive `POST /agent` directly, but the UI still shows a
+placeholder.
 
 | Area | State |
 | --- | --- |
@@ -20,14 +21,15 @@ start both processes and sign in with Google; there is no chat endpoint behind i
 | mem0 memory wrapper, graph nodes, compiled graph | done, unit-tested |
 | Frontend scaffold, design tokens, auth gate | done |
 | `/conversations` registry with ownership enforcement | done, tested |
-| AG-UI `/agent` endpoint | not built — issue #9 |
+| AG-UI `/agent` endpoint behind session + ownership gates | done, tested |
 | Conversation history endpoint | not built — issue #10 |
 | Sidebar, chat surface styling | not built — issues #13, #17 |
 
-Concretely: `build_graph()` is implemented and tested, but nothing exposes it over HTTP —
-`create_app()` mounts the auth and conversations routers and `/health`. `src/api.ts` can
-list, create, rename and delete conversations; `GET /conversations/{id}/messages` still
-returns 404 until #10 lands. `Workspace.tsx` is a placeholder that renders `signed in`.
+Concretely: `create_app()` builds the graph at startup and mounts `POST /agent` in front of
+it, alongside the auth and conversations routers and `/health`. `src/api.ts` can list,
+create, rename and delete conversations; `GET /conversations/{id}/messages` still returns 404
+until #10 lands, and `Workspace.tsx` is a placeholder that renders `signed in`, so nothing in
+the browser talks to `/agent` yet.
 
 ## Architecture
 
@@ -57,7 +59,7 @@ signed, `httpOnly` session cookie, and every call from `src/api.ts` sends
 
 ### A chat turn
 
-The graph is a fixed three-node sequence, compiled with a `PostgresSaver` checkpointer:
+The graph is a fixed three-node sequence, compiled with a Postgres checkpointer:
 
 ```
 START -> retrieve_memories -> call_model -> write_memories -> END
@@ -73,6 +75,31 @@ START -> retrieve_memories -> call_model -> write_memories -> END
 Memory is invoked as graph **nodes rather than LLM tools**, so every turn runs identically
 and every LangSmith trace has the same shape. Tools can be added later without disturbing
 this.
+
+### The `/agent` gate
+
+`POST /agent` is mounted by `ag-ui-langgraph`'s `add_langgraph_fastapi_endpoint`, which owns
+the route, so there is no handler signature to hang FastAPI dependencies off. Authentication
+and ownership are ASGI middleware instead (`agui/routes.py`), applied to that one path:
+
+- no session cookie → **401**;
+- a `threadId` the caller does not own, or that does not exist → **404**, never 403 and never
+  a distinguishable "no such thread";
+- no `threadId` at all → **400**, ahead of the adapter's own schema validation.
+
+The gate also *sets* `state.user_id` from the session, overwriting whatever the request
+claimed. `user_id` scopes every mem0 read and write the graph makes, so letting a client name
+it would hand out another user's memories through the endpoint the gate exists to protect.
+`state.memory_enabled` comes from `MEMORY_RETRIEVAL_ENABLED` the same way.
+
+The path in: `threadId` is a top-level field of AG-UI's `RunAgentInput`, which
+`ag-ui-langgraph` maps onto `config["configurable"]["thread_id"]`, and `state` becomes the
+graph's input state.
+
+LangSmith is wired by **environment variables only** — `LANGSMITH_TRACING`,
+`LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, set with `setdefault` at startup. LangGraph
+runnables trace themselves once those are set; there is no callback handler to build or
+thread through the graph.
 
 ### Failure policy
 
@@ -139,6 +166,8 @@ use_mem0/
         store.py              CRUD; title set once, delete clears checkpoints
         ownership.py          the one owner check; 404, never 403
         routes.py             /conversations list, create, rename, delete
+      agui/
+        routes.py             POST /agent + the auth/ownership middleware
       agent/
         state.py              ChatState
         memory.py             MemoryStore: mem0 wrapper that never raises
@@ -212,7 +241,7 @@ session cookie and the app renders the `Workspace` placeholder.
 ## Tests
 
 ```bash
-make test              # 55 tests
+make test              # 61 tests
 ```
 
 > **The suite needs the compose Postgres running (`make up` starts it), and it is destructive.** `test_migrate.py`
@@ -250,5 +279,14 @@ make lint          # oxlint
   Python `lib/` rule; with no leading slash it matches at any depth and silently swallowed the
   shadcn `cn` helper. A negation for `use_mem0/frontend/src/lib/` keeps it tracked — if you add
   files under another `lib/` directory, check `git status` actually sees them.
+- **The served graph uses `AsyncPostgresSaver`, not `PostgresSaver`.** The AG-UI adapter
+  reads thread state with `await graph.aget_state(...)`, and the synchronous saver answers
+  that with `NotImplementedError`. Both write the same tables, and `run_migrations()` still
+  creates them through the sync saver's `setup()`. Anything that reads `app.state.graph` has
+  to use the async API (`await graph.aget_state(...)`, `graph.ainvoke(...)`).
+- **The mem0 client is built lazily.** `MemoryClient.__init__` validates its API key over the
+  network, so constructing it during startup would let a mem0 outage abort the whole app —
+  the opposite of the failure policy above. `LazyMemoryClient` defers it to the first memory
+  call, where `MemoryStore` already degrades.
 - **mem0 scoping goes in `filters`.** `filters={"user_id": ...}`, never a top-level `user_id`;
   the v3 API rejects the latter outright.

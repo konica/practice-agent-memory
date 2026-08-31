@@ -86,3 +86,30 @@ class MemoryStore:
             self._client.add(messages, filters={"user_id": user_id})
         except Exception:
             logger.warning("mem0 add failed; memory not written", exc_info=True)
+
+
+class LazyMemoryClient:
+    """A mem0 client that is not built until the first memory call.
+
+    `MemoryClient.__init__` validates its API key over the network, so building
+    one eagerly at startup would let a mem0 outage abort the whole application —
+    exactly the coupling this module exists to avoid. Deferring it moves that
+    failure inside `MemoryStore`'s own degradation, where it is logged and the
+    turn continues without recall.
+    """
+
+    def __init__(self, api_key: str, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS):
+        self._api_key = api_key
+        self._timeout_seconds = timeout_seconds
+        self._delegate = None
+
+    def _resolve(self):
+        if self._delegate is None:
+            self._delegate = build_client(self._api_key, self._timeout_seconds)
+        return self._delegate
+
+    def search(self, *args, **kwargs):
+        return self._resolve().search(*args, **kwargs)
+
+    def add(self, *args, **kwargs):
+        return self._resolve().add(*args, **kwargs)
