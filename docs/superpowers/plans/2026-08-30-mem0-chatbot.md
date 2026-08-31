@@ -1277,7 +1277,11 @@ git commit -m "feat: add conversation registry with ownership enforcement"
   - `__init__(self, client, timeout_seconds: float = 2.0)`
   - `search(self, query: str, user_id: str) -> list[str]` — returns memory strings,
     **never raises**; returns `[]` on any failure.
-  - `add(self, messages: list[dict], user_id: str) -> None` — **never raises**.
+  - `add(self, messages: list[dict], user_id: str) -> None` — **never raises**. Passes the
+    module-level `CUSTOM_INSTRUCTIONS` string to `client.add(...)` as the `custom_instructions`
+    kwarg on every call, so mem0's own extraction is steered rather than left unconstrained.
+    See "Extraction control" in the design spec — this was blocked on research (issue #16,
+    now resolved) into whether mem0 Platform exposes such a control; it does.
   - `build_client(api_key: str)` module function returning a `mem0.MemoryClient`.
 
 Both methods are decorated with `@traceable` so they appear in LangSmith traces; mem0 calls
@@ -1341,6 +1345,19 @@ def test_add_passes_the_user_id():
 
 def test_add_swallows_failures():
     MemoryStore(FakeClient(raises=True)).add([{"role": "user", "content": "hi"}], "user-a")
+
+
+def test_add_steers_extraction_with_custom_instructions():
+    from app.agent.memory import CUSTOM_INSTRUCTIONS
+
+    captured = {}
+
+    class CapturingClient(FakeClient):
+        def add(self, messages, user_id=None, **kwargs):
+            captured["custom_instructions"] = kwargs.get("custom_instructions")
+
+    MemoryStore(CapturingClient()).add([{"role": "user", "content": "hi"}], "user-a")
+    assert captured["custom_instructions"] == CUSTOM_INSTRUCTIONS
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1359,6 +1376,20 @@ from langsmith import traceable
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 2.0
+
+# Steers mem0's own extraction on `add` — see "Extraction control" in the design spec.
+# Resolved research question (issue #16): mem0 Platform accepts this as a per-call
+# `custom_instructions` kwarg on `client.add(...)`, overriding any project-level default.
+CUSTOM_INSTRUCTIONS = (
+    "Extract only durable facts about the user that would help a personal assistant "
+    "serve them better across future conversations: stable preferences, interests, "
+    "constraints, relationships, and professional or personal context they share about "
+    "themselves.\n\n"
+    "Do not extract one-off requests or tasks (e.g. \"remind me to...\"), transient "
+    "conversational content, or sensitive identifiers such as passwords, API keys, "
+    "financial account or card numbers, or government ID numbers, even if the user "
+    "states them."
+)
 
 
 def build_client(api_key: str):
@@ -1395,7 +1426,9 @@ class MemoryStore:
     @traceable(name="mem0.add", run_type="tool")
     def add(self, messages: list[dict], user_id: str) -> None:
         try:
-            self._client.add(messages, user_id=user_id)
+            self._client.add(
+                messages, user_id=user_id, custom_instructions=CUSTOM_INSTRUCTIONS
+            )
         except Exception:
             logger.warning("mem0 add failed; memory not written", exc_info=True)
 ```
@@ -1405,7 +1438,7 @@ Create an empty `use_mem0/backend/src/app/agent/__init__.py`.
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd use_mem0/backend && pytest tests/test_memory.py -v`
-Expected: 6 passed
+Expected: 7 passed
 
 - [ ] **Step 5: Commit**
 
@@ -3245,14 +3278,13 @@ git commit -m "docs: record end-to-end acceptance findings and mem0 behaviour"
 
 ## Deferred to a second iteration
 
-Recorded in the spec, deliberately excluded from this plan. Both require verifying mem0 API
-surfaces that the design work did not confirm — only `add` and `search` were verified — so
-each needs a research step before it can be planned.
+Recorded in the spec, deliberately excluded from this plan.
 
 - **Explicit forget capability** — "forget that I mentioned my address." Needs verification
   of mem0's delete/update endpoints. Note this is what makes conversation deletion honest:
-  today, deleting a conversation leaves its derived memories in place.
-- **Control over what gets extracted** — mem0 performs its own extraction on `add` with no
-  steer from us. Needs verification that mem0 Platform exposes custom instructions or
-  categories.
+  today, deleting a conversation leaves its derived memories in place. Tracked as issue #15.
+- ~~**Control over what gets extracted.**~~ Resolved (issue #16): mem0 Platform confirmed to
+  expose `custom_instructions`. No longer deferred — folded directly into Task 6's `add()`
+  above via the `CUSTOM_INSTRUCTIONS` constant, since implementing Task 6 without it would
+  mean redoing that task rather than adding to it.
 
