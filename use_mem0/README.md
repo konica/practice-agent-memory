@@ -193,6 +193,7 @@ immediately instead of waiting out a token's lifetime.
 use_mem0/
   up, down                    start / stop everything (see Running in dev)
   venv-path                   where uv should put the backend virtualenv
+  npm-install                 frontend deps, on filesystems with or without symlinks
   docker-compose.yml          Postgres 16, healthcheck, named volume
   backend/
     src/app/
@@ -318,6 +319,21 @@ make lint          # oxlint
   UV_PROJECT_ENVIRONMENT="$(../venv-path)" uv run pytest
   ```
   Where symlinks work this is just `backend/.venv` and nothing changes.
+- **`node_modules/.bin` may be scripts rather than symlinks.** The same filesystems
+  break `npm install`, which publishes every package's executable as a symlink in
+  `node_modules/.bin` — the directory that puts `vite` on PATH. npm aborts there
+  (*"EPERM … symlink"*), leaving a node_modules that looks complete but has no
+  `.bin`, so `npm run dev` reports `sh: 1: vite: not found`. `use_mem0/npm-install`
+  installs with `--no-bin-links` and writes those entries as small shell scripts
+  instead; `up` calls it. Install frontend packages through it rather than by hand:
+  ```bash
+  ./use_mem0/npm-install          # add args as for npm install
+  ```
+  Where symlinks work it is a plain `npm install` and nothing changes. A tree npm
+  already aborted in cannot be repaired in place — it replaces a package by
+  renaming the old directory aside, which the mount also refuses (*"EACCES …
+  rename"*) — so `npm-install` deletes a `node_modules` that has no `.bin` and
+  starts clean.
 - **Cookies are `secure=False`, `samesite=lax`.** Fine over `http://localhost`; must be
   revisited before any non-local deployment.
 - **CORS allows exactly one origin.** If the frontend is not on `FRONTEND_ORIGIN`, browser
