@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 
@@ -5,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg import connect
 
+from app.agui.agent import RUN_FAILED_MESSAGE
 from app.agui.routes import AGENT_PATH
 from app.config import load_settings
 from app.main import create_app
@@ -115,3 +117,74 @@ def test_a_client_cannot_name_its_own_user_id(echo_client, client):
     ).json()
 
     assert body["state"]["user_id"] == "user-a"
+
+
+# --- a failed run is reported, not swallowed --------------------------------
+# `call_model` retries once and then lets the exception propagate. The adapter
+# emits RUN_ERROR only for in-band "error" events, so a raise ends the SSE
+# stream with no terminal event at all and the UI shows a reply that never
+# arrives. `ReportingLangGraphAgent` is what makes that a reported failure the
+# error state and its Retry action can key off.
+
+
+@pytest.fixture
+def failing_client(client):
+    """An app whose model always raises, mounted behind the real adapter."""
+    from fastapi import FastAPI
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from app.agent.graph import build_graph
+    from app.agent.memory import MemoryStore
+    from app.agui.routes import add_agent_gate, mount_agent_endpoint
+
+    class ExplodingModel:
+        def invoke(self, messages):
+            raise RuntimeError("upstream is down")
+
+    class SilentClient:
+        def search(self, *args, **kwargs):
+            return []
+
+        def add(self, *args, **kwargs):
+            return None
+
+    app = FastAPI()
+    add_agent_gate(app)
+    app.state.pool = client.app.state.pool
+    app.state.settings = client.app.state.settings
+    mount_agent_endpoint(
+        app, build_graph(MemoryStore(SilentClient()), ExplodingModel(), InMemorySaver())
+    )
+    with TestClient(app) as c:
+        yield c
+
+
+def test_a_failed_run_ends_with_run_error(failing_client, client):
+    _login(client, "user-a")
+    failing_client.cookies = client.cookies
+    convo = client.post("/conversations").json()
+
+    response = failing_client.post(
+        AGENT_PATH,
+        json={
+            "threadId": convo["id"],
+            "runId": str(uuid.uuid4()),
+            "messages": [{"id": "m1", "role": "user", "content": "hello"}],
+            "tools": [],
+            "context": [],
+            "state": {},
+            "forwardedProps": {},
+        },
+    )
+
+    assert response.status_code == 200
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert events, "the adapter streamed nothing at all"
+    assert events[-1]["type"] == "RUN_ERROR"
+    # The exception text reaches a browser; the detail stays in the server log.
+    assert events[-1]["message"] == RUN_FAILED_MESSAGE
+    assert "upstream is down" not in response.text

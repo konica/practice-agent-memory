@@ -11,8 +11,9 @@ consolidation behaviour stays visible.
 ## Status
 
 Chat works end to end in the browser: sign in, send a message, watch the reply stream, reload
-the page and the transcript is still there. What is missing is everything around it — there is
-no conversation sidebar, and the chat surface is unstyled primitives.
+the page and the transcript is still there, and the sidebar lists, renames and deletes
+conversations. What is missing is the appearance: the chat surface is still unstyled
+primitives.
 
 | Area | State |
 | --- | --- |
@@ -24,14 +25,17 @@ no conversation sidebar, and the chat surface is unstyled primitives.
 | AG-UI `/agent` endpoint behind session + ownership gates | done, tested |
 | Conversation history endpoint | done, tested |
 | assistant-ui bound to `/agent`, transcript survives reload | done, verified live (#12) |
-| Sidebar, chat surface styling | not built — issues #13, #17 |
+| Conversation sidebar: rename, delete, error + retry | done, verified live (#13) |
+| Chat surface styling | not built — issue #17 |
 
 Concretely: `create_app()` builds the graph at startup and mounts `POST /agent` in front of
 it, alongside the auth and conversations routers and `/health`. `src/api.ts` can list,
 create, rename and delete conversations and read a transcript. `Workspace.tsx` opens the
-caller's most recent conversation (creating one if there is none) and hands its id to
-`Chat.tsx`, which binds assistant-ui to `/agent`. `Chat.tsx` renders bare primitives on
-purpose — it is the smoke-test surface, and #17 replaces it with the styled one.
+caller's most recent conversation, or the empty state when they have none, and hands the
+active id to `Chat.tsx`, which binds assistant-ui to `/agent`. Around it sits the sidebar:
+`ConversationList.tsx` for the list, its inline rename and its ⋮ menu, `DeleteDialog.tsx`
+for the delete confirmation. `Chat.tsx` renders bare primitives on purpose — it is the
+smoke-test surface, and #17 replaces it with the styled one.
 
 ## Verified integrations
 
@@ -223,7 +227,9 @@ use_mem0/
     src/
       api.ts                  typed client; every call sends credentials
       App.tsx                 auth gate: Login when signed out, Workspace when in
-      Workspace.tsx           picks the conversation to show
+      Workspace.tsx           sidebar + chat pane; owns the active conversation
+      ConversationList.tsx    the list, its ⋮ menu and the inline rename
+      DeleteDialog.tsx        the delete confirmation; no undo, ever
       Chat.tsx                assistant-ui bound to /agent; bare primitives until #17
       historyAdapter.ts       adapters.history -> GET /conversations/{id}/messages
       components/ui/          shadcn/ui primitives
@@ -289,7 +295,7 @@ session cookie and the app opens a conversation you can talk to.
 ## Tests
 
 ```bash
-make test              # 73 tests
+make test              # 74 tests
 ```
 
 > **The suite needs the compose Postgres running (`make up` starts it), and it is destructive.** `test_migrate.py`
@@ -358,6 +364,12 @@ make lint          # oxlint
   so `credentials: "include"` does not reach it, and a cross-origin `fetch` sends no cookie —
   the gate then answers 401 while every other call in the app is authenticated. `Chat.tsx`
   passes `fetch: withCredentials` to the constructor.
+- **`ag-ui-langgraph` does not report a raising node.** It emits `RUN_ERROR` only for in-band
+  `"error"` events from `astream_events`; a node that *raises* — what `call_model` does once
+  its one retry is spent — propagates out of the adapter and the SSE response just stops with
+  no terminal event. The client cannot tell that from a reply still on its way, so the UI
+  showed an assistant turn that never arrived. `agui/agent.py` wraps the adapter and emits the
+  terminal `RUN_ERROR` itself, which is what the error banner and its Retry key off.
 - **assistant-ui does not rehydrate on its own.** `adapters.history` is not optional if a
   reload should show the transcript; without it the runtime starts empty and never calls the
   history endpoint. See [Verified integrations](#verified-integrations).

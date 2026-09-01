@@ -141,8 +141,10 @@ def mount_agent_endpoint(app: FastAPI, graph) -> None:
     Imported here rather than at module scope so that using the gate on its own
     does not drag the whole adapter in.
     """
-    from ag_ui_langgraph import LangGraphAgent, add_langgraph_fastapi_endpoint
+    from ag_ui_langgraph import add_langgraph_fastapi_endpoint
+
+    from .agent import ReportingLangGraphAgent
 
     add_langgraph_fastapi_endpoint(
-        app, LangGraphAgent(name=AGENT_NAME, graph=graph), AGENT_PATH
+        app, ReportingLangGraphAgent(name=AGENT_NAME, graph=graph), AGENT_PATH
     )
