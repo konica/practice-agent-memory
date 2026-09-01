@@ -10,9 +10,9 @@ consolidation behaviour stays visible.
 
 ## Status
 
-The backend serves chat today; the frontend does not yet render it. You can start both
-processes, sign in with Google, and drive `POST /agent` directly, but the UI still shows a
-placeholder.
+Chat works end to end in the browser: sign in, send a message, watch the reply stream, reload
+the page and the transcript is still there. What is missing is everything around it — there is
+no conversation sidebar, and the chat surface is unstyled primitives.
 
 | Area | State |
 | --- | --- |
@@ -22,14 +22,58 @@ placeholder.
 | Frontend scaffold, design tokens, auth gate | done |
 | `/conversations` registry with ownership enforcement | done, tested |
 | AG-UI `/agent` endpoint behind session + ownership gates | done, tested |
-| Conversation history endpoint | not built — issue #10 |
+| Conversation history endpoint | done, tested |
+| assistant-ui bound to `/agent`, transcript survives reload | done, verified live (#12) |
 | Sidebar, chat surface styling | not built — issues #13, #17 |
 
 Concretely: `create_app()` builds the graph at startup and mounts `POST /agent` in front of
 it, alongside the auth and conversations routers and `/health`. `src/api.ts` can list,
-create, rename and delete conversations; `GET /conversations/{id}/messages` still returns 404
-until #10 lands, and `Workspace.tsx` is a placeholder that renders `signed in`, so nothing in
-the browser talks to `/agent` yet.
+create, rename and delete conversations and read a transcript. `Workspace.tsx` opens the
+caller's most recent conversation (creating one if there is none) and hands its id to
+`Chat.tsx`, which binds assistant-ui to `/agent`. `Chat.tsx` renders bare primitives on
+purpose — it is the smoke-test surface, and #17 replaces it with the styled one.
+
+## Verified integrations
+
+The stack's central assumption was that assistant-ui's AG-UI binding would drive our
+`/agent` endpoint and rehydrate a transcript on reload. Until #12 that had only been checked
+against shipped type definitions. It has now been run against a live server.
+
+**Result: it works, with the explicit history adapter — not automatically.**
+
+The test: sign in, send "Hello, my name is Sam.", wait for the reply, reload the page, confirm
+both messages are still on screen. Driven through a headless browser against a real OpenAI
+model. The Google consent screen is the one step a script cannot click, so the session cookie
+was minted through `create_session` — the same row and the same signed cookie `/auth/callback`
+issues; everything after sign-in is the real path.
+
+Four things had to be true, and three of them were not true on the first attempt:
+
+| Assumption | Outcome |
+| --- | --- |
+| `useAgUiRuntime({ agent })` renders a reply from `/agent` | **Holds.** The run showed a pending indicator and then the model's reply, over the AG-UI event stream. |
+| `@assistant-ui/react` exports a `<Thread />` component | **False.** 0.15.17 exports primitives only — `ThreadPrimitive`, `MessagePrimitive`, `ComposerPrimitive`. `Chat.tsx` composes them by hand. |
+| `HttpAgent` sends the session cookie | **False.** It runs its own `fetch`, and a cross-origin `fetch` omits credentials, so the gate answered 401. Fixed with the `fetch` hook on `HttpAgentConfig`. |
+| Reload rehydrates the transcript on its own | **False.** After reload the pane was empty and no history request was made. `adapters.history` is required, and once supplied it behaves exactly as documented. |
+
+So the fallback — hand-building the chat surface on `@ag-ui/client` — is **not** needed. The
+assistant-ui runtime does the work; what it needs is configuration, not replacement.
+
+### What the run also turned up
+
+**mem0 writes are failing.** Every `write_memories` came back
+`400 At least one entity ID is required (user_id, agent_id, app_id, or run_id)`: `MemoryStore.add`
+passes `filters={"user_id": ...}`, but v3's `/memories/add/` wants the entity id at the top
+level — the opposite of `search`, where `filters` is correct. One `search` also hit the 2s
+deadline and returned no recall. Neither broke the chat, which is the failure policy working
+as designed, and neither is in this task's scope: memory behaviour is #14's. Recorded here so
+that ticket starts from an observation rather than a guess.
+
+**A backend bug:** `GET /conversations/{id}/messages` returned 500 in
+the live app, because it read the transcript through the *synchronous* `graph.get_state()`
+while the served graph is checkpointed by `AsyncPostgresSaver`. Its tests had not caught it —
+they drive a `PostgresSaver` graph, where the sync read is correct. `aread_messages` and an
+`async def` route fix it, and `test_graph.py` now covers the read the app actually performs.
 
 ## Architecture
 
@@ -178,6 +222,9 @@ use_mem0/
     src/
       api.ts                  typed client; every call sends credentials
       App.tsx                 auth gate: Login when signed out, Workspace when in
+      Workspace.tsx           picks the conversation to show
+      Chat.tsx                assistant-ui bound to /agent; bare primitives until #17
+      historyAdapter.ts       adapters.history -> GET /conversations/{id}/messages
       components/ui/          shadcn/ui primitives
 ```
 
@@ -236,12 +283,12 @@ backend startup, so the first `make up` creates the three application tables and
 the four checkpointer tables.
 
 Open the app URL and sign in. On success you land back on the frontend with a
-session cookie and the app renders the `Workspace` placeholder.
+session cookie and the app opens a conversation you can talk to.
 
 ## Tests
 
 ```bash
-make test              # 61 tests
+make test              # 73 tests
 ```
 
 > **The suite needs the compose Postgres running (`make up` starts it), and it is destructive.** `test_migrate.py`
@@ -283,7 +330,21 @@ make lint          # oxlint
   reads thread state with `await graph.aget_state(...)`, and the synchronous saver answers
   that with `NotImplementedError`. Both write the same tables, and `run_migrations()` still
   creates them through the sync saver's `setup()`. Anything that reads `app.state.graph` has
-  to use the async API (`await graph.aget_state(...)`, `graph.ainvoke(...)`).
+  to use the async API (`await graph.aget_state(...)`, `graph.ainvoke(...)`) — that is what
+  `aread_messages` is for. The reverse mistake costs a live 500: calling the async saver's
+  synchronous interface from the running loop fails with *"another command is already in
+  progress"*, and a test built on `PostgresSaver` will not reproduce it.
+- **`@assistant-ui/react` has no `<Thread />`.** 0.15.17 ships primitives only. A ready-made
+  thread component comes from the assistant-ui registry (`npx shadcn@latest add` from
+  `r.assistant-ui.com`), not from the package. `Chat.tsx` composes the primitives directly
+  until #17 brings the styled component in.
+- **`HttpAgent` needs the `fetch` hook to send cookies.** It does not go through `src/api.ts`,
+  so `credentials: "include"` does not reach it, and a cross-origin `fetch` sends no cookie —
+  the gate then answers 401 while every other call in the app is authenticated. `Chat.tsx`
+  passes `fetch: withCredentials` to the constructor.
+- **assistant-ui does not rehydrate on its own.** `adapters.history` is not optional if a
+  reload should show the transcript; without it the runtime starts empty and never calls the
+  history endpoint. See [Verified integrations](#verified-integrations).
 - **The mem0 client is built lazily.** `MemoryClient.__init__` validates its API key over the
   network, so constructing it during startup would let a mem0 outage abort the whole app —
   the opposite of the failure policy above. `LazyMemoryClient` defers it to the first memory
