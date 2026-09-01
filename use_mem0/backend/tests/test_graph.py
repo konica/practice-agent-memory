@@ -14,7 +14,11 @@ DB_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://app:app@localhost:543
 
 
 class FakeClient:
-    """Stands in for ``mem0.MemoryClient``; identity arrives via ``filters``."""
+    """Stands in for ``mem0.MemoryClient``; ``add`` takes identity top-level.
+
+    ``search`` is the opposite and wants ``filters`` — see ``test_memory`` for the
+    double that enforces both rules.
+    """
 
     def __init__(self):
         self.added = []
@@ -25,7 +29,7 @@ class FakeClient:
         return [{"memory": "is vegetarian"}]
 
     def add(self, messages, filters=None, **kwargs):
-        self.added.append((messages, (filters or {}).get("user_id")))
+        self.added.append((messages, kwargs.get("user_id")))
 
 
 class ScriptedModel:

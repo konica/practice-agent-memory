@@ -62,7 +62,8 @@ class MemoryStore:
     @traceable(name="mem0.search", run_type="retriever")
     def search(self, query: str, user_id: str) -> list[str]:
         """Return this user's relevant memories, or `[]` on any failure."""
-        # Identity goes in `filters`; mem0's v3 API rejects a top-level user_id.
+        # `search` takes identity in `filters` and raises on a top-level user_id.
+        # `add` is the exact opposite — see the note there before touching either.
         future = self._executor.submit(
             self._client.search, query, filters={"user_id": user_id}
         )
@@ -82,8 +83,15 @@ class MemoryStore:
     @traceable(name="mem0.add", run_type="tool")
     def add(self, messages: list[dict], user_id: str) -> None:
         """Write the turn's exchange to this user's memory; failures are logged only."""
+        # Identity goes top-level here, unlike `search` above: `add` copies its
+        # kwargs straight into the request body, so a `filters` dict travels as
+        # a `filters` field and the Platform answers 400 "At least one entity ID
+        # is required". mem0 2.0.19's own `AddMemoryOptions` docstring claims the
+        # opposite — `add`'s method docstring and its missing entity-param guard
+        # are the accurate ones. Failures here are only logged, so getting this
+        # wrong loses every write silently.
         try:
-            self._client.add(messages, filters={"user_id": user_id})
+            self._client.add(messages, user_id=user_id)
         except Exception:
             logger.warning("mem0 add failed; memory not written", exc_info=True)
 

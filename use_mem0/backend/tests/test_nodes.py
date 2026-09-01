@@ -11,7 +11,11 @@ from app.agent.nodes import (
 
 
 class FakeClient:
-    """Stands in for ``mem0.MemoryClient``; identity arrives via ``filters``."""
+    """Stands in for ``mem0.MemoryClient``; ``add`` takes identity top-level.
+
+    ``search`` is the opposite and wants ``filters`` — see ``test_memory`` for the
+    double that enforces both rules.
+    """
 
     def __init__(self, results=None):
         self.results = results or []
@@ -21,7 +25,7 @@ class FakeClient:
         return self.results
 
     def add(self, messages, options=None, **kwargs):
-        self.added.append((messages, (kwargs.get("filters") or {}).get("user_id")))
+        self.added.append((messages, kwargs.get("user_id")))
 
 
 def test_retrieve_puts_memories_on_state():
