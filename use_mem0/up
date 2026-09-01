@@ -91,6 +91,15 @@ need_env OPENAI_API_KEY MEM0_API_KEY LANGSMITH_API_KEY LANGSMITH_PROJECT \
 
 : "${API_PORT:=8000}"
 : "${WEB_PORT:=5173}"
+
+# uvicorn and Vite both listen on loopback by default, which is right on a
+# laptop and useless in a sandbox: the browser is on the host, and a published
+# port forwards to this machine's external interface, where a loopback socket
+# answers nothing. The failure is silent — the port publishes fine and the page
+# never loads — so bind every interface when there is a host to be reached from,
+# and stay off the LAN when there is not. SANDBOX_VM_ID is set only inside one.
+: "${BIND_HOST:=${SANDBOX_VM_ID:+0.0.0.0}}"
+: "${BIND_HOST:=127.0.0.1}"
 export FRONTEND_ORIGIN="${FRONTEND_ORIGIN:-http://localhost:$WEB_PORT}"
 
 # --wait blocks on the healthcheck already declared in docker-compose.yml, so
@@ -123,9 +132,9 @@ uv sync --quiet --all-extras --project backend
 ./npm-install --silent
 
 start api "$API_PORT" uv run --project backend \
-      uvicorn app.main:app --factory --port "$API_PORT"
+      uvicorn app.main:app --factory --host "$BIND_HOST" --port "$API_PORT"
 start web "$WEB_PORT" npm --prefix frontend run dev -- \
-      --port "$WEB_PORT" --strictPort
+      --host "$BIND_HOST" --port "$WEB_PORT" --strictPort
 
 wait_for "http://localhost:$API_PORT/health" api
 wait_for "http://localhost:$WEB_PORT"        web
@@ -141,3 +150,16 @@ cat <<EOF
   logs  $STATE_DIR/*.log
   stop  $stop_hint
 EOF
+
+# Those URLs are the sandbox's own localhost, not the developer's. Publishing is
+# a host-side command they cannot run from in here, so name it exactly. Same
+# port on both sides deliberately: FRONTEND_ORIGIN and VITE_API_BASE are built
+# from these numbers, and remapping them breaks CORS and the API base URL.
+if [ -n "${SANDBOX_VM_ID:-}" ]; then
+  cat <<EOF
+  host  those are this sandbox's localhost — to browse from your machine, run
+        there: sbx ports $SANDBOX_VM_ID --publish $WEB_PORT:$WEB_PORT/tcp
+               sbx ports $SANDBOX_VM_ID --publish $API_PORT:$API_PORT/tcp
+
+EOF
+fi
