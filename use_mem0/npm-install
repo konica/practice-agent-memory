@@ -35,10 +35,15 @@ fi
 #   npm ERR! code EACCES
 #   npm ERR! syscall rename
 #
-# no matter how often ./up is re-run. A missing .bin is the signature of that
-# aborted install — the packages unpacked, the symlink step did not — so start
-# from a clean tree, the way up drops a .venv left without an interpreter.
-if [ -d node_modules ] && [ ! -d node_modules/.bin ]; then
+# no matter how often ./up is re-run. An empty or missing .bin is the signature
+# of that aborted install — the packages unpacked, the symlink step did not — so
+# start from a clean tree, the way up drops a .venv left without an interpreter.
+#
+# Empty and missing both count: npm creates .bin and then fails on the first
+# symlink inside it, so the directory it leaves behind exists but holds nothing.
+# Testing only for the directory lets that state through, and the install below
+# dies on the rename instead.
+if [ -d node_modules ] && [ -z "$(ls -A node_modules/.bin 2>/dev/null)" ]; then
   echo "npm-install: removing node_modules left unfinished by an earlier install"
   rm -rf node_modules
 fi
