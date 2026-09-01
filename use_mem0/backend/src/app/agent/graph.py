@@ -28,13 +28,8 @@ def build_graph(store: MemoryStore, model, checkpointer):
     return builder.compile(checkpointer=checkpointer)
 
 
-def read_messages(graph, thread_id: str) -> list[dict]:
-    """Read a thread's transcript from the checkpointer for UI rehydration.
-
-    An unknown thread has no checkpoint, so `state.values` is empty and the
-    transcript comes back as `[]` rather than raising.
-    """
-    state = graph.get_state({"configurable": {"thread_id": thread_id}})
+def _transcript(state) -> list[dict]:
+    """Shape a checkpointed state into the transcript the UI reads."""
     transcript = []
     for message in (state.values or {}).get("messages", []):
         if isinstance(message, HumanMessage):
@@ -42,3 +37,26 @@ def read_messages(graph, thread_id: str) -> list[dict]:
         elif isinstance(message, AIMessage):
             transcript.append({"role": "assistant", "content": message.content})
     return transcript
+
+
+def read_messages(graph, thread_id: str) -> list[dict]:
+    """Read a thread's transcript from a synchronously checkpointed graph.
+
+    An unknown thread has no checkpoint, so `state.values` is empty and the
+    transcript comes back as `[]` rather than raising.
+
+    Only valid for a graph built on `PostgresSaver`. The served graph uses
+    `AsyncPostgresSaver`; read that one with `aread_messages`.
+    """
+    return _transcript(graph.get_state({"configurable": {"thread_id": thread_id}}))
+
+
+async def aread_messages(graph, thread_id: str) -> list[dict]:
+    """The same read, for a graph checkpointed by `AsyncPostgresSaver`.
+
+    The async saver's synchronous interface bridges back onto the loop it was
+    built on and reuses the one connection, so calling `get_state` on the served
+    graph raises `another command is already in progress` — a runtime failure
+    the sync-saver tests cannot reach.
+    """
+    return _transcript(await graph.aget_state({"configurable": {"thread_id": thread_id}}))

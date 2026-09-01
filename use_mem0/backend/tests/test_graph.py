@@ -4,8 +4,9 @@ import uuid
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-from app.agent.graph import build_graph, read_messages
+from app.agent.graph import aread_messages, build_graph, read_messages
 from app.agent.memory import MemoryStore
 from app.db.migrate import run_migrations
 
@@ -103,3 +104,33 @@ def test_read_messages_returns_the_transcript(graph_parts):
 def test_read_messages_for_an_unknown_thread_is_empty(graph_parts):
     graph, _, _ = graph_parts
     assert read_messages(graph, str(uuid.uuid4())) == []
+
+
+async def test_aread_messages_reads_an_async_checkpointed_graph():
+    """The transcript read the served app actually performs.
+
+    `create_app` checkpoints with `AsyncPostgresSaver`, whose synchronous
+    interface bridges back onto the loop it was built on and reuses the one
+    connection — so `read_messages` against the served graph fails with
+    "another command is already in progress". Every other test here drives a
+    `PostgresSaver`, which is why that failure only ever appeared in the browser.
+    """
+    run_migrations(DB_URL)
+    thread_id = str(uuid.uuid4())
+    async with AsyncPostgresSaver.from_conn_string(DB_URL) as checkpointer:
+        graph = build_graph(MemoryStore(FakeClient()), ScriptedModel(), checkpointer)
+        await graph.ainvoke(
+            {"messages": [HumanMessage("hello")], "user_id": "u", "memory_enabled": True},
+            {"configurable": {"thread_id": thread_id}},
+        )
+        assert await aread_messages(graph, thread_id) == [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "reply 1"},
+        ]
+
+
+async def test_aread_messages_for_an_unknown_thread_is_empty():
+    run_migrations(DB_URL)
+    async with AsyncPostgresSaver.from_conn_string(DB_URL) as checkpointer:
+        graph = build_graph(MemoryStore(FakeClient()), ScriptedModel(), checkpointer)
+        assert await aread_messages(graph, str(uuid.uuid4())) == []
