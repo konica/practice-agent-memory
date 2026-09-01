@@ -334,6 +334,20 @@ make lint          # oxlint
   renaming the old directory aside, which the mount also refuses (*"EACCES …
   rename"*) — so `npm-install` deletes a `node_modules` that has no `.bin` and
   starts clean.
+- **In a sandbox the dev servers bind every interface.** uvicorn and Vite listen on
+  loopback by default, which is right on a laptop and useless in a sandbox: the
+  browser is on the host and reaches the app through a *published* port, which
+  forwards to this machine's external interface — where a loopback socket answers
+  nothing. The failure is silent, since the port publishes cleanly and the page
+  simply never loads. So `up` sets `BIND_HOST` to `0.0.0.0` when `SANDBOX_VM_ID` is
+  set and `127.0.0.1` otherwise; set `BIND_HOST` yourself to override either way.
+  Publishing is a host-side command, so `up` prints the exact one:
+  ```bash
+  sbx ports <sandbox> --publish 5173:5173/tcp
+  sbx ports <sandbox> --publish 8000:8000/tcp
+  ```
+  Keep the same port number on both sides. `FRONTEND_ORIGIN` and `VITE_API_BASE`
+  are built from these numbers, so remapping them breaks CORS and the API base URL.
 - **Cookies are `secure=False`, `samesite=lax`.** Fine over `http://localhost`; must be
   revisited before any non-local deployment.
 - **CORS allows exactly one origin.** If the frontend is not on `FRONTEND_ORIGIN`, browser
