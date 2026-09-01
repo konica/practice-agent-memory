@@ -10,7 +10,7 @@ import {
   type Conversation,
   type User,
 } from "./api";
-import { Chat } from "./Chat";
+import { Chat } from "./chat/Chat";
 import { ConversationList } from "./ConversationList";
 
 export function Workspace({ user }: { user: User }) {
