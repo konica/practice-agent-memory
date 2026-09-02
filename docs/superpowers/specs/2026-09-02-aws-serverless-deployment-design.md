@@ -105,7 +105,7 @@ This is the highest-leverage decision in the design. A single image runs under `
 FROM python:3.12-slim AS deps        # uv sync --frozen --no-dev -> /app/.venv
 FROM node:22 AS web                  # npm ci && npm run build (VITE_API_BASE="")
 FROM python:3.12-slim AS runtime
-COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:1.0.1 /lambda-adapter /opt/extensions/lambda-adapter
+COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:<pinned-release> /lambda-adapter /opt/extensions/lambda-adapter
 COPY --from=deps /app/.venv /app/.venv
 COPY --from=web  /app/dist   /app/static
 ENV PORT=8080
@@ -116,7 +116,7 @@ CMD ["uvicorn","app.main:app","--factory","--host","0.0.0.0","--port","8080", \
 Notes:
 
 - **Python 3.12**, not 3.14 — better wheel coverage, and it is the floor for SnapStart should it ever become viable.
-- The Lambda Web Adapter binary is **inert outside Lambda**. It is a file in `/opt/extensions` that nothing reads unless the Lambda runtime is present. ~10 MB for full portability.
+- The Lambda Web Adapter binary is **inert outside Lambda**. It is a file in `/opt/extensions` that nothing reads unless the Lambda runtime is present. ~10 MB for full portability. Pin an exact released tag and verify it exists (`docker manifest inspect`) — never `latest`, which would make every rebuild a silent behaviour change.
 - The SPA is baked into the image at `/app/static` so local dev is single-origin too. In the deployed design CloudFront serves the SPA from S3 instead; the same bundle is uploaded from the build.
 - A **second entrypoint in the same image** runs migrations: `python -m app.db.migrate`, overridden at run time. Same image, three roles: web, migrate, local dev.
 
@@ -192,7 +192,9 @@ Separately, emit an SSE comment heartbeat (`: ping\n\n`) every 10–15 s on `/ag
 
 ### 4.6 Make the connection pool size configurable
 
-`db/engine.py:6-10` constructs `ConnectionPool` without `min_size`, so it defaults to **4**. On Lambda, connections multiply by concurrency: 10 reserved × (4 + 1 saver) = 50 connections against a free-tier Neon compute. Make `min_size`/`max_size` configurable and default them to `0`/`1` for the serverless deployment.
+`db/engine.py:6-10` constructs `ConnectionPool` without `min_size`, so it defaults to **4**. On Lambda, connections multiply by concurrency: 10 reserved × (4 + 1 saver) = 50 connections against a free-tier Neon compute. Make `min_size`/`max_size` configurable, defaulting to `1`/`4`, and set `DB_POOL_MAX_SIZE=1` on Lambda.
+
+**`min_size` must stay at least 1.** `open_pool` calls `pool.wait()`, which blocks until `min_size` connections are established — that is the mechanism behind the existing `test_startup_fails_loudly_when_postgres_is_unavailable` guarantee. With `min_size=0` the wait returns immediately and an unreachable database would no longer abort startup, silently converting a loud failure into a broken deployment. Bound Lambda with `max_size` instead, giving 2 connections per execution environment (1 pool + 1 checkpointer).
 
 ### 4.7 Load secrets from SSM at init
 
